@@ -1,0 +1,26 @@
+{
+  "name": "dsh-in-hand-relay",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "掌上 DSH 的只读中继：把 DSH 的任务状态/对话接口按白名单转发到一个带令牌鉴权的端口，供局域网直连或 SSH 反向隧道 + 自建 nginx 暴露",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "relay",
+    "phone",
+    "mobile",
+    "reverse-tunnel",
+    "ssh"
+  ],
+  "license": "MIT",
+  "dependencies": {}
+}

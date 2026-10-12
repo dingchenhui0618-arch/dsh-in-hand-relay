@@ -1,0 +1,7 @@
+# Keep the repository text LF-only: these files are read by Node, nginx examples
+# and the shell, and Windows checkouts would otherwise re-write every line.
+* text=auto eol=lf
+
+# Binary assets must stay untouched.
+*.png binary
+*.ico binary

@@ -1,0 +1,19 @@
+dsh-in-hand-relay
+Copyright (c) 2026 dsh-in-hand contributors
+MIT licensed (see LICENSE)
+
+This product bundles files from the dsh-in-hand project
+(https://github.com/dingchenhui0618-arch/dsh-in-hand, Apache-2.0):
+
+  public/page.html               the phone-side page shell
+  public/sw.js                   the service worker
+  public/manifest.webmanifest    the PWA manifest
+  public/icon-192.png            app icon
+  public/icon-512.png            app icon
+
+Those files are the relay's user interface. They are redistributed here
+unmodified so that this relay is usable on its own; a copy of the Apache-2.0
+license text is at https://www.apache.org/licenses/LICENSE-2.0
+
+The relay itself (server.mjs, lan.ps1, its built-in fallback page, and
+everything under docs/) is original work under the MIT license above.

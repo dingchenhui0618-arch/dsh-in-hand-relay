@@ -1,0 +1,17 @@
+# --- credentials & machine-local state (NEVER commit) ------------------------
+# .token        relay access token, generated on first run
+# .lan          LAN-mode marker file
+# .public-url   learned public entry point
+# .env          per-machine overrides (RELAY_PORT / RELAY_UPSTREAM / ...)
+.token
+.lan
+.public-url
+.env
+.env.*
+
+# --- local scratch / evidence ------------------------------------------------
+_verify/
+.verify/
+*.log
+*.tmp
+*.bak
