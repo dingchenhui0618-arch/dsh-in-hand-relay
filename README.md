@@ -1,5 +1,8 @@
 # dsh-in-hand-relay
 
+[![CI](https://github.com/dingchenhui0618-arch/dsh-in-hand-relay/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/dingchenhui0618-arch/dsh-in-hand-relay/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT%20%2B%20Apache--2.0-blue.svg)](LICENSE)
+
 **把 DSH 的任务状态和手机端界面安全地送到你手机上的一层只读中继** —— 手机 → 公网 HTTPS → 你的 nginx → SSH 反向隧道 → 本机中继 → DSH，或者干脆手机和电脑同一个 Wi-Fi 直连。不需要公网 IP、不需要端口映射、不需要把 DSH 的 GUI 暴露出去。
 
 > 面向的读者：已经在自己电脑上跑 DSH，想用手机看任务/对话，但不想把「一个默认 `danger-full-access` 的终端」挂到公网上的人。照着本文从头做，大约 15 分钟能跑通局域网那条路。
@@ -8,6 +11,11 @@
 - 鉴权是**共享令牌** + **6 位配对码换 30 天 cookie**；令牌首次运行自动生成，不用向谁申请。
 - 暴露面是**硬编码白名单**：只有 `/taskwatch/*` 下面明确列出的路径能被转发，其余一律 404。
 - 界面外壳（PWA）由中继本地提供，来自 [dsh-in-hand](https://github.com/dingchenhui0618-arch/dsh-in-hand) 插件仓库（Apache-2.0，见 `NOTICE`）；用上游插件的那份也可以。
+
+> 用着还行的话，点个 ⭐ 就够了——插件市场的「搜插件」按 GitHub star 排序，star 是这个插件能被人翻到的唯一杠杆。
+
+安全模型——它监听哪、谁能连、令牌与配对码各自的边界、白名单里哪些路由其实会写：
+[SECURITY.md](SECURITY.md)。
 
 ---
 

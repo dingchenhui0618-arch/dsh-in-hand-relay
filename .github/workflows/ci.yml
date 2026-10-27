@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+
+      # The relay is a zero-dependency script, so there is nothing to install.
+      - name: Syntax check
+        run: node --check server.mjs
+
+      - name: Syntax check (CI helpers)
+        run: node --check scripts/ci-smoke.mjs
+
+      # lan.ps1 is a Windows convenience wrapper; make sure it still parses.
+      - name: Parse lan.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD 'lan.ps1'), [ref]$null, [ref]$errors)
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+          Write-Host 'lan.ps1 parses'
+
+      # Boots the real server on a random loopback port and exercises the
+      # token gate, the whitelist and the loopback-only pairing code.
+      - name: Smoke test
+        run: node scripts/ci-smoke.mjs
