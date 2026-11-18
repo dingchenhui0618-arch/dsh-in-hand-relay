@@ -331,6 +331,7 @@ $env:RELAY_PUBLIC_URL='https://dsh.example.com'
 | `RELAY_PUBLIC_URL` | 自动学 | 公网入口，如 `https://dsh.example.com`；不填就从 `Host` 头学 |
 | `RELAY_PAGE_FILE` | `public/page.html` | 覆盖页面外壳文件路径 |
 | `RELAY_SW_FILE` | `public/sw.js` | 覆盖 service worker 文件路径 |
+| `TASKWATCH_TICKET_SECRET` | 读 `~/.dsh/taskwatch-ticket.key`，没有就生成 | 换路票据的 HMAC 密钥（≥32 字符）。**必须与插件宿主用的是同一个值**，否则插件签的票到这里一律 401。不设就按上面那个文件读/生成（权限 0600）。见[中继跑在服务器上](#中继跑在服务器上让扫码也能用) |
 
 **文件**
 
@@ -401,9 +402,94 @@ powershell -ExecutionPolicy Bypass -File .\lan.ps1 on|off|status [-Port 3099] [-
 5. ticket 立刻作废：重放无效，60 秒过期，只作用于 /taskwatch 这一个路径
 ```
 
-ticket 是 18 字节随机值、存在内存里、兑换即删。它的作用范围被刻意压到最小：**只换鉴权，不做别的**，也不允许通过它访问其他路由。
+从 **v1.1.0** 起这张票是 **v3 格式**：`v3.<expMs>.<nonce>.<aud>.<hmac>`，HMAC-SHA256 签名，密钥与
+[dsh-in-hand](https://github.com/dingchenhui0618-arch/dsh-in-hand) 插件宿主共用（`TASKWATCH_TICKET_SECRET`，
+或两台机器上值相同的 `~/.dsh/taskwatch-ticket.key`，见[下一节](#中继跑在服务器上让扫码也能用)）。它带来的三件事：
 
-同理，`POST /taskwatch/ticket {to:"remote"}` 会给你公网入口的 ticket；还不知道公网入口时回 409。
+- **插件宿主签的票，中继也认。** 以前中继只认自己进程内 Map 里的随机串，宿主签的票打过来一律 401，
+  扫码最后落到配对页；现在两边用同一套格式和密钥互认。中继在 `/taskwatch/lan.json` 的
+  `ticketVersions` / `ticketAudience` 和 `/healthz` 的 `x-taskwatch-ticket-versions` 上声明能力，
+  插件据此决定签 v3 还是退回 v2。
+- **受众绑定（`aud`）。** `remote` 的票只由公网中继兑现，`lan` 的票只由插件宿主兑现。给局域网入口签的票
+  拿到公网中继会被 **401** —— 这堵的就是「跨入口重放」。
+- **严格一次性。** 验签、验时效、nonce 记账都在**同一个同步函数**里完成（中间没有 `await`），同一张票
+  第二次兑换一律 401；nonce 记录全在进程内，重启即清空，另有 30 秒一次的 `unref` 定时器清理。
+
+兼容性（别把用户锁在门外）：旧插件签的 **v2** 票（`v2.<expMs>.<nonce>.<hmac>`，没有 `aud`）在
+**2027-01-01** 之前继续接受，之后一律拒绝；两边谁先升级都照常能用。不认识的老随机串仍回落到进程内
+Map —— 老页面在同一个进程里还能用，进程一重启就失效。
+
+票的作用范围仍然被刻意压到最小：**只换鉴权，不做别的**，也不允许通过它访问其他路由。
+`POST /taskwatch/ticket {to:"remote"}` 会给你公网入口的票；还不知道公网入口时回 409。
+
+### 中继跑在服务器上：让扫码也能用
+
+典型场景：中继跑在公网服务器上（`/etc/taskwatch-relay/env`），而签票的插件宿主在你自己的
+电脑里（`~/.dsh/taskwatch-ticket.key`）。两台机器各自生成的文件天然不是同一个值，所以必须
+手工对齐成同一个票据密钥，否则中继只会回 401，手机扫码最后落到配对页。
+
+**前提：中继 ≥ 1.1.0**（v3 票据从这一版开始），**插件 ≥ 1.8.6**（它才认 v3 票；插件签的票
+也才会被这一版中继接受）。先确认版本/能力：
+
+```sh
+curl -s -D - -o /dev/null https://<你的域名>/healthz | grep -i x-taskwatch-ticket-versions
+# 期望看到：x-taskwatch-ticket-versions: 3,2
+```
+
+**1. 在你自己电脑上找到那份密钥**
+
+```sh
+cat ~/.dsh/taskwatch-ticket.key
+```
+
+它由插件宿主或中继首次运行时生成（32 字节随机值、base64url、权限 0600）。没有这个文件就说明
+那台机器还没跑过插件/中继，先跑一次，或者直接 `export TASKWATCH_TICKET_SECRET=<≥32 字符的值>`
+在两边用同一个自己定的值。
+
+**2. 传到服务器（`scp`；`root@` 换成你自己的账号）**
+
+```sh
+scp ~/.dsh/taskwatch-ticket.key root@<server-ip>:/tmp/taskwatch-ticket.key
+```
+
+**3. 写进服务器的环境文件并重启**
+
+```sh
+sudo mkdir -p /etc/taskwatch-relay
+# 只增改这一行，**不要**覆盖整个文件：里面还有 RELAY_TOKEN / RELAY_UPSTREAM，
+# 覆盖掉等于把入口令牌弄丢（所有手机都要重新配对）。
+sudo sh -c 'sed -i "/^TASKWATCH_TICKET_SECRET=/d" /etc/taskwatch-relay/env
+printf "TASKWATCH_TICKET_SECRET=%s\n" "$(cat /tmp/taskwatch-ticket.key)" >> /etc/taskwatch-relay/env'
+sudo chown root:root /etc/taskwatch-relay/env
+sudo chmod 600 /etc/taskwatch-relay/env
+shred -u /tmp/taskwatch-ticket.key 2>/dev/null || rm -f /tmp/taskwatch-ticket.key
+sudo systemctl restart taskwatch-relay
+```
+
+文件里就只有这一行：`TASKWATCH_TICKET_SECRET=<那个值>`；**文件归 root、权限 600**。
+这一步假定你的 systemd 单元叫 `taskwatch-relay`（按你自己的改）、且用
+`EnvironmentFile=/etc/taskwatch-relay/env` 启动中继 —— 没有的话在 `[Service]` 段加这一行再
+`sudo systemctl daemon-reload`。用 `EnvironmentFile` 而不是把值写进
+`ExecStart=` / `Environment=`，是为了 `systemctl cat` 里看不到它、权限也能单独收紧。
+
+**4. 确认生效（日志只打印来源，不打印密钥值）**
+
+```sh
+journalctl -u taskwatch-relay -n 20 --no-pager | grep -E '票据密钥|票据版本'
+# 期望：
+#   票据密钥  来自环境变量 TASKWATCH_TICKET_SECRET
+#   票据版本  v3（只兑现 aud=remote 的 v3 票；v2 兼容至 2027-01-01）
+```
+
+**注意事项**
+
+- 这是**凭据**：能签 60 秒一次性换路票，而兑换成功拿到的就是那台中继的 30 天 `tw` cookie ——
+  按「等于能登录中继」的标准保管。**绝不提交进仓库，也不要贴到聊天、issue、工单或截图里**。
+  两边不一致时的现象只是扫码 401 然后回到配对页，并不会提示「密钥不对」。
+- 轮换它（换一个新值、两边一起重启）只会作废**尚未兑换**的票；已经发出去的 30 天 cookie
+  不受影响，不用重新配对。
+- 中继只在启动时读一次，不保管、不转发给上游；`/taskwatch/lan.json` 与 `/healthz` 只声明版本，
+  响应里绝不出现密钥。
 
 ### 四个诊断接口各自的作用
 
@@ -414,7 +500,8 @@ ticket 是 18 字节随机值、存在内存里、兑换即删。它的作用范
 | `/taskwatch/upstream-health` | 否 | 上游体检：对 DSH 发一次 4 秒超时的探测，回 `{ok, status, ms, upstream}`。用来把「手机连不上」区分成「中继/隧道坏了」还是「DSH 没在跑」 |
 | `/taskwatch/ticket` | 否（POST） | 发一张一次性换路凭据，见上 |
 
-另外 `/healthz` 免鉴权、只回 `ok`、不回显任何状态 —— 给看门狗/负载均衡探活用。
+另外 `/healthz` 免鉴权、只回 `ok`、不回显任何状态 —— 给看门狗/负载均衡探活用；
+从 v1.1.0 起它多带一个 `x-taskwatch-ticket-versions: 3,2` 响应头，插件靠它判断这台中继支不支持 v3 票据。
 
 ### 页面外壳和 PWA 为什么由中继本地提供
 
@@ -521,6 +608,7 @@ dsh-in-hand-relay/
 ├─ lan.ps1                         Windows 局域网开关（纯 ASCII，自提权）
 ├─ package.json                    npm start / engines
 ├─ README.md                       本文件
+├─ CHANGELOG.md                    版本变更（只写事实）
 ├─ LICENSE                         MIT（public/ 下的界面文件来自 Apache-2.0 项目，见 NOTICE）
 ├─ NOTICE                          第三方来源声明
 ├─ .gitignore                      排除 .token / .lan / .public-url / .env / 日志 / _verify

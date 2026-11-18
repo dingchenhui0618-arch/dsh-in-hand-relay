@@ -42,11 +42,15 @@
  *   RELAY_PUBLIC_URL   公网入口（如 https://dsh.example.com）；不填则从 Host 头学
  *   RELAY_PAGE_FILE    覆盖页面外壳文件路径
  *   RELAY_SW_FILE      覆盖 service worker 文件路径
+ *   TASKWATCH_TICKET_SECRET  换路票据密钥（≥32 字符）；不设则读 ~/.dsh/taskwatch-ticket.key，
+ *                      都没有就生成并收紧权限。必须与插件宿主（dsh-in-hand）用的是同一个值，
+ *                      否则插件签的票到这里一律 401。
  */
 import { createServer } from 'node:http'
-import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
-import { networkInterfaces } from 'node:os'
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync } from 'node:fs'
+import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -399,9 +403,174 @@ function readBody(req, limit) {
 // 127.0.0.1，也看不出手机在哪个网络。所以判定只能放在页面里，靠"当前这条路是否
 // 失败"来推。中继负责提供事实（有哪些入口、上游活不活）和**免输配对码的换路凭据**。
 const PUBLIC_URL_FILE = join(HERE, '.public-url')
+
+// ── 换路票据（v3，1.1.0 起）────────────────────────────────────────────────
+// 背景：插件宿主（dsh-in-hand）签的票，打到**跑在服务器上的**中继也要能兑现。
+// 以前这里只有进程内 Map，只认自己签的随机串，于是宿主签的票一律 401，扫码会落到配对页。
+//
+// 票格式（两侧必须一致，见 dsh-in-hand 的 lib/ticket.js）：
+//   v3.<expMs>.<nonce base64url>.<aud>.<hmac base64url>
+//   HMAC = HMAC-SHA256(secret, 'v3|' + expMs + '|' + nonce + '|' + aud)
+//   aud ∈ {remote, lan} —— **校验方身份**，不是入口名字。中继只兑现 aud=remote；
+//   aud=lan 的票在这里一律 401，这条就是"给局域网入口签的票被拿去兑换公网中继"的修法。
+//   一次性靠进程内 nonce 记账：查 Map 与写 Map 在同一次同步调用里，中间没有 await。
+//
+// 向后兼容（硬要求，别把用户锁在门外）：
+//   - v2 票（无 aud）在过渡期内继续接受，截止 TICKET_V2_SUNSET_AT；之后一律拒绝。
+//     这个日期必须与插件里的同名常量一致（2027-01-01T00:00:00Z）。
+//   - 不认识的老随机串回落到 legacyTickets（进程内 Map，只认本进程发过的）。
+//   - 旧插件签的 v2 打到新中继必须照常能进：升级顺序由用户决定，任何一边先升级都不能锁门。
 const TICKET_TTL_MS = 60 * 1000
-const tickets = new Map()             // ticket -> 过期时间戳
+const TICKET_MAX_AGE_MS = 180 * 1000
+const TICKET_VERSION = 3
+const TICKET_VERSIONS = [3, 2]
+const TICKET_AUD_REMOTE = 'remote'
+const TICKET_AUD_LAN = 'lan'
+const TICKET_V2_SUNSET_AT = Date.UTC(2027, 0, 1, 0, 0, 0)
+const TICKET_V3_RE = /^v3\.\d{13}\.[A-Za-z0-9_-]{16,}\.(remote|lan)\.[A-Za-z0-9_-]{20,}$/
+const TICKET_V2_RE = /^v2\.\d{13}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{20,}$/
+const TICKET_SECRET_MIN = 32
+const TICKET_SECRET_FILE = join(homedir(), '.dsh', 'taskwatch-ticket.key')
+const legacyTickets = new Map()       // 老格式随机票（仅本进程）→ 过期时间戳
+const seenNonces = new Map()          // 已兑换过的 nonce → 过期时间戳（本进程严格一次性）
+const NONCE_MAX = 8192
+const NONCE_SWEEP_MS = 30 * 1000
 const VIRTUAL_IFACE = /vEthernet|Hyper-V|WSL|VMware|VirtualBox|Loopback|docker|Bluetooth|TAP-/i
+
+function normalizeTicketSecret(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : ''
+  return text.length >= TICKET_SECRET_MIN ? text : ''
+}
+
+function ticketHmacInput(version, expMs, nonce, aud) {
+  return version === 3 ? 'v3|' + expMs + '|' + nonce + '|' + aud : 'v2|' + expMs + '|' + nonce
+}
+
+/** 拆票面：认识 v3 / v2，其它一律 null（不验签、不看时间）。 */
+function parseTicket(ticket) {
+  if (typeof ticket !== 'string') return null
+  const v3 = TICKET_V3_RE.test(ticket)
+  const v2 = !v3 && TICKET_V2_RE.test(ticket)
+  if (!v3 && !v2) return null
+  const parts = ticket.split('.')
+  const expMs = Number(parts[1])
+  if (!Number.isSafeInteger(expMs)) return null
+  return {
+    version: v3 ? 3 : 2,
+    expMs,
+    nonce: parts[2],
+    aud: v3 ? parts[3] : '',
+    hmac: v3 ? parts[4] : parts[3],
+  }
+}
+
+function ticketSignatureOk(secret, parsed) {
+  const expected = createHmac('sha256', secret)
+    .update(ticketHmacInput(parsed.version, parsed.expMs, parsed.nonce, parsed.aud))
+    .digest()
+  let given
+  try { given = Buffer.from(parsed.hmac, 'base64url') } catch { return false }
+  if (given.length !== expected.length) return false
+  return timingSafeEqual(given, expected)
+}
+
+/** 清掉已过期记录；claim 时按需调用，另有 30 秒一次的后台定时器（unref）。 */
+function pruneNonces(at = Date.now()) {
+  for (const [key, exp] of seenNonces) if (exp <= at) seenNonces.delete(key)
+  return seenNonces.size
+}
+
+/**
+ * 单次性记账：**查 Map 与写 Map 在同一次同步调用里完成**，中间没有 await。
+ * 第一次见到 → true（立即写入）；重复 → false。
+ */
+function claimNonce(key, expMs) {
+  const at = Date.now()
+  if (seenNonces.size >= NONCE_MAX) pruneNonces(at)
+  if (seenNonces.has(key)) return false
+  while (seenNonces.size >= NONCE_MAX) {
+    const oldest = seenNonces.keys().next().value
+    if (oldest === undefined) break
+    seenNonces.delete(oldest)
+  }
+  seenNonces.set(key, Math.max(Number(expMs) || 0, at + 1000))
+  return true
+}
+const nonceSweeper = setInterval(() => pruneNonces(), NONCE_SWEEP_MS)
+if (typeof nonceSweeper.unref === 'function') nonceSweeper.unref()
+
+/** 与插件宿主同一套解析顺序：环境变量 → ~/.dsh/taskwatch-ticket.key → 生成并收紧权限。
+ *  任何失败都退回内存密钥（本进程可用），**绝不让中继因为一个密钥文件写不了而启动失败**，
+ *  也**绝不把密钥本身打日志**。 */
+function loadTicketSecret() {
+  const fromEnv = normalizeTicketSecret(process.env.TASKWATCH_TICKET_SECRET)
+  if (fromEnv) return { secret: fromEnv, source: 'env', file: '', permission: 'n/a' }
+
+  let existing = ''
+  try { existing = normalizeTicketSecret(readFileSync(TICKET_SECRET_FILE, 'utf8')) } catch { /* 走生成 */ }
+  if (existing) return { secret: existing, source: 'file', file: TICKET_SECRET_FILE, permission: 'existing' }
+
+  const secret = randomBytes(32).toString('base64url')
+  try {
+    mkdirSync(dirname(TICKET_SECRET_FILE), { recursive: true, mode: 0o700 })
+    writeFileSync(TICKET_SECRET_FILE, secret + '\n', { mode: 0o600 })
+    let permission = 'unknown'
+    if (process.platform === 'win32') {
+      // Windows 没有 POSIX 权限位：用 icacls 去掉继承、只给当前用户完全控制。
+      const user = String(process.env.USERNAME || process.env.USER || '').trim()
+      if (!user) {
+        permission = 'icacls-no-user'
+      } else {
+        const result = spawnSync('icacls', [TICKET_SECRET_FILE, '/inheritance:r', '/grant:r', user + ':F'], {
+          windowsHide: true,
+          timeout: 5000,
+        })
+        permission = result && result.status === 0 ? 'icacls-owner' : 'icacls-failed'
+      }
+    } else {
+      try { chmodSync(TICKET_SECRET_FILE, 0o600); permission = 'chmod-600' } catch { permission = 'chmod-failed' }
+    }
+    return { secret, source: 'generated', file: TICKET_SECRET_FILE, permission }
+  } catch (error) {
+    return {
+      secret,
+      source: 'memory',
+      file: TICKET_SECRET_FILE,
+      permission: 'write-failed',
+      error: String((error && error.message) || error),
+    }
+  }
+}
+const ticketSecret = loadTicketSecret()
+
+/** 签一张票。中继只给自己兑现，所以默认 v3 + aud=remote；version: 2 留给兼容测试。 */
+function signTicket(secret, { now = Date.now, ttlMs = TICKET_TTL_MS, aud = TICKET_AUD_REMOTE, version = TICKET_VERSION } = {}) {
+  const expMs = now() + ttlMs
+  const nonce = randomBytes(16).toString('base64url')
+  if (version === 2) {
+    const hmac = createHmac('sha256', secret).update(ticketHmacInput(2, expMs, nonce)).digest('base64url')
+    return 'v2.' + expMs + '.' + nonce + '.' + hmac
+  }
+  if (aud !== TICKET_AUD_REMOTE && aud !== TICKET_AUD_LAN) throw new Error('v3 票据必须指定受众（remote / lan）')
+  const hmac = createHmac('sha256', secret).update(ticketHmacInput(3, expMs, nonce, aud)).digest('base64url')
+  return 'v3.' + expMs + '.' + nonce + '.' + aud + '.' + hmac
+}
+
+/** 只验签与时效（不记账）。v3 按受众过滤，v2 在过渡期内才接受。兑换一律走 redeemTicket。 */
+function verifyTicket(secret, ticket, { now = Date.now, aud = TICKET_AUD_REMOTE, v2SunsetAt = TICKET_V2_SUNSET_AT } = {}) {
+  const parsed = parseTicket(ticket)
+  if (!parsed || !normalizeTicketSecret(secret)) return false
+  if (parsed.version === 3) {
+    if (aud && parsed.aud !== aud) return false
+  } else if (!(now() < v2SunsetAt)) {
+    return false
+  }
+  if (!ticketSignatureOk(secret, parsed)) return false
+  const at = now()
+  if (!(parsed.expMs > at)) return false
+  if (parsed.expMs - at > TICKET_MAX_AGE_MS) return false
+  return true
+}
 
 function readPublicUrl() {
   const fromEnv = String(process.env.RELAY_PUBLIC_URL || '').trim()
@@ -428,19 +597,32 @@ function learnPublicUrl(req) {
 }
 
 function mintTicket() {
-  const now = Date.now()
-  for (const [k, exp] of tickets) if (exp < now) tickets.delete(k)
-  const t = randomBytes(18).toString('base64url')
-  tickets.set(t, now + TICKET_TTL_MS)
-  return t
+  return signTicket(ticketSecret.secret, { ttlMs: TICKET_TTL_MS, aud: TICKET_AUD_REMOTE, version: TICKET_VERSION })
 }
 
-/** 一次性兑换：换路成功即作废，重放无效，60 秒过期。 */
+/**
+ * 兑换：解析 → 受众 → 验签 → 时效 → 记账，全在这一个同步函数里（中间没有 await，
+ * 所以同一进程内的并发兑换只有第一次能成功）。v2 在过渡期内仍可用；老随机串回落到 Map。
+ */
 function redeemTicket(t) {
-  const exp = tickets.get(t)
-  if (!exp) return false
-  tickets.delete(t)
-  return exp > Date.now()
+  const text = typeof t === 'string' ? t.trim() : ''
+  if (!text) return false
+  const parsed = parseTicket(text)
+  if (!parsed) {
+    // 老页面/老随机串：只认本进程发过的，进程重启即失效。
+    const exp = legacyTickets.get(text)
+    if (!exp) return false
+    legacyTickets.delete(text)
+    return exp > Date.now()
+  }
+  // 受众（v3 只收 remote；v2 没有受众，靠过渡期 + 短期 + 单次兜着）+ 验签 + 时效。
+  if (!verifyTicket(ticketSecret.secret, text, { aud: TICKET_AUD_REMOTE })) return false
+  if (!claimNonce(parsed.version + ':' + (parsed.aud || '-') + ':' + parsed.nonce, parsed.expMs)) {
+    // 已用过的票再来：记一行，但**绝不**把票面（等价于凭据）写进日志。
+    console.warn('  拒绝 replay attempt（aud=' + (parsed.aud || 'v2') + ', v=' + parsed.version + '）')
+    return false
+  }
+  return true
 }
 
 function lanAddresses() {
@@ -467,6 +649,10 @@ function lanInfo() {
     addresses: addrs,
     entries: addrs.map((a) => 'http://' + a.ip + ':' + PORT + '/taskwatch'),
     pairing: 'http://127.0.0.1:' + PORT + '/taskwatch/pair',
+    // 能力声明：插件探测的就是这两个字段（免鉴权，**不含任何凭据**），据此决定签 v3 还是退回 v2。
+    // 老中继没有这两个字段 → 插件按"不支持 v3"处理。这个响应里绝不出现票据密钥。
+    ticketVersions: TICKET_VERSIONS,
+    ticketAudience: TICKET_AUD_REMOTE,
   }
 }
 
@@ -655,8 +841,10 @@ const server = createServer(async (req, res) => {
   }
 
   // 看门狗探活：免鉴权，且不回显任何状态内容。
+  // 顺带声明票据能力：插件靠它决定签 v3 还是回退 v2。旧插件不读这个头，旧中继也不发它，
+  // 两边都无感，升级顺序任意。
   if (url.pathname === '/healthz') {
-    send(res, 200, 'text/plain; charset=utf-8', 'ok')
+    send(res, 200, 'text/plain; charset=utf-8', 'ok', { 'x-taskwatch-ticket-versions': TICKET_VERSIONS.join(',') })
     return
   }
 
@@ -1040,6 +1228,12 @@ server.listen(PORT, BIND, () => {
   console.log('  访问地址  http://' + BIND + ':' + PORT + '/taskwatch?k=' + TOKEN)
   console.log('  令牌文件  ' + TOKEN_FILE)
   console.log('  令牌来源  ' + loaded.source)
+  // 只打印密钥**来源**，绝不打印密钥值：它等价于"能签 60 秒一次性换路票"的能力。
+  console.log(ticketSecret.source === 'env'
+    ? '  票据密钥  来自环境变量 TASKWATCH_TICKET_SECRET'
+    : '  票据密钥  ' + ticketSecret.file + '（' + ticketSecret.source + ' / ' + ticketSecret.permission + '）')
+  console.log('  票据版本  v' + TICKET_VERSION + '（只兑现 aud=' + TICKET_AUD_REMOTE
+    + ' 的 v3 票；v2 兼容至 ' + new Date(TICKET_V2_SUNSET_AT).toISOString().slice(0, 10) + '）')
   if (loaded.created) {
     console.log('')
     console.log('  ⚠ 首次运行：已自动生成一个 256 位随机令牌并写进上面那个文件（权限 0600）。')
