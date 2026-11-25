@@ -525,6 +525,15 @@ journalctl -u taskwatch-relay -n 20 --no-pager | grep -E '票据密钥|票据版
 
 service worker 和页面外壳**必须同版本**：这两个文件曾经各有一份、行为不同（一份不删旧缓存、也不认 `/taskwatch/session`），到底拿到哪个取决于请求先命中谁。所以启动时只认一次，且两者都优先跟随同一个来源。
 
+**外壳要跟着插件走。** `public/page.html` / `sw.js` / `manifest.webmanifest` 与插件 `lib/`
+里的是同一份；插件换了界面而这里没换，远端就是「HTTP 200、界面是旧的」——2026-10-12
+到 11-25 就停过一次，v1.10.0 的简洁模式、运行进度条、连接诊断在手机上一个都看不到。
+发版前跑一次（只复制这三个文件，图标本来就同源）：
+
+```
+node scripts/sync-shell.mjs ../dsh-taskwatch
+```
+
 ---
 
 ## 故障排查

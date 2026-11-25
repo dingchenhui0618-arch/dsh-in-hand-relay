@@ -196,7 +196,7 @@ const ROUTES = new Map([
 // 版本与能力声明：插件读它们判断「远端能不能批准 / 回答 / 收审批流」。
 // 数组里只有能力**名字**，不含任何凭据；老插件不读这几个字段，老中继也不发，
 // 两边升级顺序任意。
-const RELAY_VERSION = '1.2.0'
+const RELAY_VERSION = '1.2.1'
 const CAPABILITIES = Object.freeze([
   'approve', 'answer', 'queue', 'decisions', 'devices',
   'notify', 'push', 'star', 'approvals-stream',

@@ -170,14 +170,14 @@ async function run() {
   if (lanJson.ticketAudience !== 'remote') {
     fail(`/taskwatch/lan.json: expected ticketAudience "remote", got ${JSON.stringify(lanJson.ticketAudience)}`)
   }
-  if (lanJson.relayVersion !== '1.2.0') {
-    fail(`/taskwatch/lan.json: expected relayVersion "1.2.0", got ${JSON.stringify(lanJson.relayVersion)}`)
+  if (lanJson.relayVersion !== '1.2.1') {
+    fail(`/taskwatch/lan.json: expected relayVersion "1.2.1", got ${JSON.stringify(lanJson.relayVersion)}`)
   }
   if (!Array.isArray(lanJson.capabilities) || !lanJson.capabilities.includes('approvals-stream')) {
     fail(`/taskwatch/lan.json: expected capabilities to include "approvals-stream", got ${JSON.stringify(lanJson.capabilities)}`)
   }
   if (lan.body.includes(TICKET_SECRET)) fail('/taskwatch/lan.json: must never contain the ticket secret')
-  console.log('OK   /taskwatch/lan.json declares relayVersion 1.2.0 and the approvals-stream capability')
+  console.log('OK   /taskwatch/lan.json declares relayVersion 1.2.1 and the approvals-stream capability')
 
   // 9. A ticket signed by the plugin host (same secret, v3, aud=remote) is
   //    redeemed exactly like one minted by the relay: 302 + HttpOnly cookie.

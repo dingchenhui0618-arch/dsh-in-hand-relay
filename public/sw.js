@@ -44,7 +44,60 @@ const SHELL = ['/taskwatch', '/taskwatch/icon-192.png', '/taskwatch/icon-512.png
 // 那次重载是 cache-first 时代的补丁（旧外壳永远不会自己变新）。现在页面已经是
 // **网络优先**（见下面 fetch 里的注释），每次导航本来就取新版，这个补丁既没必要、
 // 又足以把整站打死。别再加回来。
-const CACHE = 'taskwatch-v13'
+// v17（v1.7.7）：页面换了正文图片的兜底渲染（坏图 → 44px 以内提示条）与抽屉图标
+//     （字符字形 → 内联 SVG）。外壳里的 icon-192 也是预缓存的，一起升号清掉旧壳。
+// v18（v1.7.8）：图片流光的包含块修好（长会话不再整屏闪）+ 附件信封改成图片卡。
+// v20（v1.8.0）：手机端新增一次性审批（批准 / 拒绝 + 二次确认 + 倒计时）。这是
+//     外壳里的交互，不升号的话装到桌面的 PWA 会继续拿旧页面，看不到按钮。
+// v21（v1.8.1）：文件链接带上会话（sessionId），403 / 413 换成可区分的提示文案。
+//     同样是外壳里的代码，不升号已安装的 PWA 会继续发不带会话的旧请求。
+// v22（v1.8.2）：首页改成待办优先（P1）—— 无 hash 时是首页，会话页退到
+//     #session/<id>。这是外壳结构与路由的改动，不升号已安装的 PWA 仍会打开旧页面。
+// v23（v1.8.3）：手机端能回答选项式提问（选项行 / 多选 / 计划审批 / 自定义回答）。
+//     首页待办区、任务详情抽屉、会话页问答条都要靠新外壳才渲染得出来。
+// v24（v1.8.4）：断线自动重连与陈旧提示（P2）。连接三点的文案、页脚提示条、
+//     一键重试都在外壳里；不升号的话已安装的 PWA 会继续跑旧页面，断网后
+//     仍要手动下拉刷新。
+// v25（v1.8.7）：新增设备页与撤销（P4）。列表、二次确认层、被撤销说明屏全是
+//     外壳里的结构与路由（#devices）；不升号已安装的 PWA 会继续跑没有设备入口的旧页面。
+// v26（v1.8.8）：高危动作二次确认（P4 收尾）。高危徽标、卡片内确认层、遮罩与
+//     Esc 取消都在外壳里；不升号已安装的 PWA 会继续直接发 approve，跳过这道门槛。
+// v27（v1.8.9）：相机直发（P5）。相机键、缩略图/大小/取消、压缩状态都在外壳里；
+//     不升号已安装的 PWA 会继续打开没有相机键的旧页面。
+// v28（v1.8.10）：并行视图（P5）。整屏、排序（需要你 > 失败 > 运行中 > 空闲）、
+//     失败原因与子代理折叠都在外壳里；不升号已安装的 PWA 会继续打开旧首页。
+// v29（v1.8.12）：入口切换器（P3）。整屏 #entries、当前入口标记、添加上限与校验、
+//     抽屉里的「入口 · 当前名」全是外壳里的结构；不升号已安装的 PWA 会继续跑
+//     没有入口清单的旧页面。
+// v30（v1.8.15）：离屏通知设置（P1）。整屏 #notify、抽屉里的「通知」、添加/开关/
+//     删除/测试四种交互与会收到什么的说明都在外壳里；不升号已安装的 PWA 会继续
+//     打开一个没有通知入口的旧页面，用户会以为这个版本没这功能。
+// v31（v1.8.16）：Server酱（推到微信）成为通知主通道。类型选择从两项变三项、
+//     SendKey 输入与说明、列表里的「Server酱」徽标与 `SCT…abcd` 掩码都在外壳里；
+//     不升号已安装的 PWA 会继续只显示飞书 / 通用 webhook 两项。
+// v32（v1.8.17）：系统通知（Web Push）。页面新增「系统通知」区块（状态 / 开启 /
+//     测试 / 关闭 + iOS 添加到主屏幕引导），SW 自己新增 push 与 notificationclick
+//     两个事件 —— 装到桌面的 PWA 用的还是**旧 SW**，不升号它根本不会响应 push。
+// v33（v1.8.18）：会话抽屉重排（工作台 / 操作提到最上）+ 移除德州扑克入口。
+//     抽屉结构全在外壳里；不升号已安装的 PWA 会继续打开「会话列表在上、要滑到底
+//     才看见工作台」的旧页面，也就看不出这次改了什么。
+// v34（v1.8.20）：首页新增品牌行（虎鲸 + 掌上 DSH），计数行去掉「子代理 N」。
+//     两处都在外壳里；不升号已安装的 PWA 会继续显示没有品牌行的旧首页。
+// v35（v1.8.22）：会话抽屉「操作」区末尾新增「给掌上 DSH 点个星」，并加入
+//     一次性提示条。两者都在外壳里；不升号已安装的 PWA 看不到新入口。
+// v36（v1.8.23）：点星从外链改成 GitHub 设备码授权面板（8 位码 / 复制 /
+//     打开授权页 / 轮询 / 成功失败四态）。整个面板与轮询都在外壳里；不升号
+//     已安装的 PWA 仍会打开旧页面，点一下只会跳 GitHub，看不到授权流程。
+// v37（v1.8.24）：点星授权改用 public_repo（服务端一行改动），外壳没有结构变化；
+//     升号随那次提交发出，这里补记，避免号段对不上。
+// v38（v1.8.25）：对话里的 `dsh-ui` 围栏支持确认表单（text / radio / checkbox /
+//     input / textarea / submit + 回退代码块）。围栏解析、卡片结构、提交与去重
+//     全在 page.html 这一段外壳里；不升号已安装的 PWA 会继续把整段 JSON 当代码块，
+//     用户看不到表单，也不会认为这个版本有这功能。
+// v42（v1.10.0）：简洁模式 + 运行条 + 连接稳定性。三处都在外壳里：输入区多了一个
+//     「+」（附件/拍照收进它）、header 下多了一条运行条、重连与「重连中」的判定
+//     改了。不升号已安装的 PWA 会继续跑没有运行条、且断流就闪黄点的旧页面。
+const CACHE = 'taskwatch-v42'
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
 
@@ -78,6 +131,54 @@ self.addEventListener('activate', (e) => {
   })())
 })
 
+// ── 系统通知（v1.8.17）──────────────────────────────────────────────────
+//
+// 推送由宿主发到浏览器的推送服务（FCM / APNs），系统再叫醒这个 SW。这里只做
+// 两件事：把 JSON 正文变成一条通知；点通知时回到**同一个聊天窗口**而不是新开一个。
+//
+// 正文口径在宿主侧（lib/webpush.js 的 buildPushMessage）：标题「N 件事等你」、
+// 正文是工具名 + 一句说明前 30 字，不含命令与路径。SW 只负责显示，绝不自己拼内容。
+self.addEventListener('push', (e) => {
+  let payload = null
+  try { payload = e.data ? e.data.json() : null } catch { payload = null }
+  if (!payload || typeof payload !== 'object') payload = {}
+  const title = typeof payload.title === 'string' && payload.title ? payload.title : '有事等你'
+  const options = {
+    body: typeof payload.body === 'string' ? payload.body : '',
+    // 固定 tag：同一批待办反复推时替换上一条，而不是在通知栏叠成一列。
+    tag: typeof payload.tag === 'string' && payload.tag ? payload.tag : 'taskwatch-pending',
+    icon: typeof payload.icon === 'string' && payload.icon ? payload.icon : '/taskwatch/icon-192.png',
+    badge: '/taskwatch/icon-192.png',
+    // 点通知要落到的地址由宿主给（订阅时的 origin + #home）。这里只透传。
+    data: { url: (payload.data && typeof payload.data.url === 'string' && payload.data.url) || '' },
+  }
+  e.waitUntil(self.registration.showNotification(title, options))
+})
+
+// 点通知：优先复用已经开着的窗口（手机上 PWA 只有一个实例，新开窗口等于把用户
+// 已经翻到一半的会话顶掉），找不到才 openWindow。导航目标来自上面 push 写进
+// notification.data.url 的那个地址；它一定和 scope 同源（宿主按订阅的 origin 生成）。
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close()
+  const scope = new URL(self.registration.scope)
+  let target = ''
+  try { target = new URL((e.notification.data && e.notification.data.url) || '', scope).toString() } catch { target = scope.toString() }
+  e.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    for (const client of windows) {
+      let url
+      try { url = new URL(client.url) } catch { continue }
+      if (url.origin !== scope.origin) continue
+      try {
+        await client.focus()
+        if (client.url !== target) await client.navigate(target)
+        return
+      } catch { /* 这个窗口不让导航，换下一个 */ }
+    }
+    if (self.clients.openWindow) await self.clients.openWindow(target)
+  })())
+})
+
 self.addEventListener('fetch', (e) => {
   const u = new URL(e.request.url)
   if (e.request.method !== 'GET' || u.origin !== self.location.origin) return
@@ -108,7 +209,8 @@ self.addEventListener('fetch', (e) => {
   // 尤其是 /taskwatch/chat/stream —— 它是一条长连接的 SSE，被 service worker
   // 经手就会退化成"等整段读完再给"，流式效果全丢。POST 在函数开头已经被方法
   // 判断放行了，这里再显式拦一次，防的是以后有人加一条 /taskwatch 下的通配规则。
-  if (u.pathname.indexOf('/taskwatch/chat/') === 0) return
+  // v1.8.0 的审批 SSE 同理，显式放过。
+  if (u.pathname.indexOf('/taskwatch/chat/') === 0 || u.pathname === '/taskwatch/approvals/stream') return
 
   if (SHELL.indexOf(u.pathname) >= 0) {
     // 页面本身走**网络优先**：先取新的，失败（离线）才回缓存。
