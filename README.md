@@ -580,10 +580,39 @@ N 次 `/taskwatch/data?view=phone`，再握一段**完全不发请求**的 `/tas
 TW_BASE=https://你的域名 TW_TOKEN=<中继令牌> TW_HOLD=300 TW_EXPECT_HEARTBEAT=1 node scripts/soak.mjs
 ```
 
+只想量「手机每 5 秒轮询会不会失败」（不握长连接）时用 `scripts/watch-polls.mjs`：
+
+```
+TW_BASE=https://你的域名 TW_TOKEN=<中继令牌> node scripts/watch-polls.mjs 600 5000
+```
+
+它按页面的真实节奏（5 秒一次、8 秒超时）打 `/taskwatch/data`，最后给出成功数、
+失败明细与两次成功之间的最大间隔 —— 手机上「隔一会儿就重连」时先跑这个。
+
 2026-11-25 对 `https://dsh.dionysusding.cn` 的实测（插件 v1.10.0、中继 1.2.1，
 nginx → SSH 反向隧道 → 本机中继）：300 秒窗口未被掐断，24 条心跳全部 12.0 秒；
 首字节 154ms；断后重连 3/3（116–175ms）；轮询 60 次全过，p50 75ms、p95 152ms，
 宿主忙时偶发单次 1.6–7.6 秒的慢请求。
+
+### 手机「隔一会儿就重连」：先量宿主采集，不要先怀疑网络
+
+2026-11-25 晚的复测把这条链路真正的问题定位在**宿主侧采集**，不是隧道：
+
+| 时段 | 现象 |
+|---|---|
+| 修复前 | 本机直连 `http://127.0.0.1:3080/taskwatch/data` 在 6ms 与 30s 超时之间跳；600 秒浸泡里 SSE 449 秒被掐断，重连 3/3 失败（TTFB 12.5s 或没有） |
+| 根因 | 快照里的 `subagents.listDescendants()` 要等宿主的树锁：agent 跑着时单次 **12.4 秒**；旧实现「缓存过期就等新的一份」，于是每次轮询都可能等满这 12 秒 |
+| 修复后（插件 v1.10.2） | 采集改成 stale-while-revalidate（先回旧的、后台刷新），子代理树改为后台单飞刷新、快照不 await；60 次轮询 60/60、p50 169ms、p95 579ms；600 秒空闲 SSE 未断，50 条心跳最大间隔 12.5 秒；重连 3/3（149/124/131ms） |
+
+宿主侧的证据落在 `~/.dsh/taskwatch-snapshot-slow.log`（超过 1.5 秒才写一行，只有耗时、
+分段与条数，不含会话内容）。手机上再遇到"断一下又回来"，按这个顺序查：
+
+1. `curl.exe -s -o NUL -w "%{http_code} %{time_total}" -H "Authorization: Bearer <令牌>" https://<域名>/taskwatch/data?view=phone` —— 超过 3 秒就是宿主采集慢；
+2. 看 `~/.dsh/taskwatch-snapshot-slow.log` 的 `phases`，哪一段大就是哪一段锁住；
+3. 最后才看隧道：`/healthz` 与 `x-taskwatch-hop`（见下一节）。
+
+> 提醒：页面把**一次**轮询失败就当断线（`NET.attempts > 0` 立刻黄点 + 页脚横幅）。
+> 链路真慢的时候，这个判定会放大体感 —— 先按上面把采集修快，而不是去清手机缓存。
 
 ### 三种 502，怎么一眼分清
 

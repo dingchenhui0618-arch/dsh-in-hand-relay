@@ -74,7 +74,9 @@ if (record && record.sha256 && rows.length) {
     problems.push(`public/shell.json 记的 page.html 指纹与当前文件不一致（记录 ${record.sha256.slice(0, 12)}…，实际 ${page.b.slice(0, 12)}…）`)
   }
   if (record.pluginVersion && pluginVersion !== 'unknown' && record.pluginVersion !== pluginVersion) {
-    problems.push(`public/shell.json 记的插件版本 ${record.pluginVersion} 与插件当前 ${pluginVersion} 不一致`)
+    // 插件只改了宿主侧代码（没动 lib/ 三个外壳）时，指纹仍然一致、外壳仍然可用；
+    // 版本记录旧一点只是说明"上次同步来自哪个插件版本"，不该拦发版。
+    console.log(`注意：public/shell.json 记的插件版本是 ${record.pluginVersion}，插件当前是 ${pluginVersion}（外壳字节一致，不影响使用）`)
   }
 } else if (!record) {
   problems.push('public/shell.json 不存在（同步一次即可生成；中继会标 x-shell-sync: unknown）')
