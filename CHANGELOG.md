@@ -2,6 +2,27 @@
 
 只写事实：每一版改了什么、验证过什么。
 
+## 1.2.2
+
+- 远端跑的是哪一版，现在一条 `curl -I` 就能确认：`/healthz`、`/taskwatch` 页与静态外壳
+  的响应头带 `x-relay-version`，另带外壳指纹 `x-shell-bytes` / `x-shell-sha256` /
+  `x-shell-build` / `x-shell-sync`（`ok` / `stale` / `unknown`）。`/taskwatch/lan.json`
+  同时多一个 `shell` 对象。
+- 新增 `/taskwatch/shell.json`（需令牌）：当前外壳的文件名、字节数、SHA-256、构建号、
+  修改时间，以及上次同步的来源、插件版本、同步时间与 `sync` 判定。
+- `scripts/sync-shell.mjs --check <插件仓库>`：逐字节比 `public/` 与插件 `lib/`，再核对
+  `shell.json` 指纹，不一致退出 1；同步模式一并写 `shell.json`。中继启动日志打印外壳
+  指纹，`shell.json` 与当前文件对不上会直接警告。
+- 页面、`sw.js`、`manifest` 一律 `Cache-Control: no-store`；README 写清 nginx 侧不要给
+  `/taskwatch` 加 `expires` / `proxy_cache` —— 更新靠文件内容换，不靠过期时间。
+- `scripts/ci-smoke.mjs` 扩到 **17 项检查**：新增页面响应头指纹、`no-store`、
+  `shell.json` 的 `sync: ok` 三项断言。
+- 实测（插件 v1.10.2 外壳）：页面 590,899 B、`sha256 f002e6ec76ff…`、`sw.js` 17,681 B
+  （`taskwatch-v43`）；公网 `/healthz` 返回 `x-relay-version: 1.2.2` 与
+  `x-shell-sync: ok`。
+- 转发行为与 1.2.1 相同（白名单 35 条、`capabilities` 9 项），只是把「外壳是不是旧的」
+  从比对文件大小变成可核对、可告警的信号。
+
 ## 1.2.1
 
 - 修正一个「页面 200 但界面是旧的」问题：`public/page.html` 停在 2026-10-12 的版本，
