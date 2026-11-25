@@ -98,6 +98,7 @@ async function warmPolls() {
     attempts: rows.length,
     ok: okRows.length,
     failed: rows.length - okRows.length,
+    failures: rows.filter(r => !r.ok).slice(0, 5),
     p50: pct(times, 50),
     p95: pct(times, 95),
     max: times.length ? times[times.length - 1] : null,

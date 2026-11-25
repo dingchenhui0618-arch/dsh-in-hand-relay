@@ -538,6 +538,21 @@ node scripts/sync-shell.mjs ../dsh-taskwatch
 
 ## 故障排查
 
+### 连通性保活实验（`scripts/soak.mjs`）
+
+「重连快不快」和「连接能不能一直活着」是两件事。这个脚本量后者：对远端入口连打
+N 次 `/taskwatch/data?view=phone`，再握一段**完全不发请求**的 `/taskwatch/chat/stream`，
+记录首字节、心跳间隔、流有没有被链路上的空闲超时掐断，最后 abort 再重开三次量重连。
+
+```
+TW_BASE=https://你的域名 TW_TOKEN=<中继令牌> TW_HOLD=300 TW_EXPECT_HEARTBEAT=1 node scripts/soak.mjs
+```
+
+2026-11-25 对 `https://dsh.dionysusding.cn` 的实测（插件 v1.10.0、中继 1.2.1，
+nginx → SSH 反向隧道 → 本机中继）：300 秒窗口未被掐断，24 条心跳全部 12.0 秒；
+首字节 154ms；断后重连 3/3（116–175ms）；轮询 60 次全过，p50 75ms、p95 152ms，
+宿主忙时偶发单次 1.6–7.6 秒的慢请求。
+
 ### 三种 502，怎么一眼分清
 
 | 现象 | 断在哪 | 判据 |
