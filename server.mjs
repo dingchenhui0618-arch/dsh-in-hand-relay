@@ -1,16 +1,25 @@
 #!/usr/bin/env node
 /**
- * dsh-in-hand-relay —— 「掌上 DSH」的只读中继
+ * dsh-in-hand-relay —— 「掌上 DSH」的中继
  *
  * 为什么需要它：DSH 的 web GUI 本身没有任何认证，而本机默认文件权限常常是
  * danger-full-access。把这个 GUI 直接暴露到公网 = 把整台机器的控制权挂出去。
- * 但"看看任务跑到哪了"只需要读，所以这里在**另一个端口**上按白名单重发固定路径，
- * 其余一律 404 —— 操控面永远不出回环。
+ * 所以这里在**另一个端口**上按白名单重发固定路径，其余一律 404 —— GUI 本体
+ * 永远不出回环；鉴权、配对码、换路票据都在中继这一层做。
  *
- * 暴露面是硬编码白名单，不可配置成任意上游路径：
+ * 从 1.2.0 起白名单覆盖手机页需要的**完整控制面**：批准 / 回答、消息队列、设备撤销、
+ * 通知渠道、系统推送订阅、点星。也就是说持有配对 cookie 的人等于持有这台机器的终端
+ * （SECURITY.md 里明写了这一条）。能力边界仍然只有这份白名单 —— 它不可配置、不接受
+ * 任意上游路径：
  *   GET  /taskwatch                       -> 本地上层外壳（见 PAGE_FILE），读不到才代理上游
  *   GET  /taskwatch/data                  -> <上游>/taskwatch/data      （JSON）
  *   GET  /taskwatch/session               -> <上游>/taskwatch/session   （单会话最近对话）
+ *   POST /taskwatch/approve | /taskwatch/answer          -> 审批放行/拒绝、回答提问（写）
+ *   GET  /taskwatch/approvals/stream                     -> 审批与提问事件流（SSE，流式）
+ *   GET  /taskwatch/decisions | /taskwatch/devices       -> 待决定清单、已配对设备
+ *   POST /taskwatch/devices/revoke                       -> 撤销一台设备（写）
+ *   GET|POST /taskwatch/chat/queue | /chat/queue/reorder -> 消息队列查看 / 整队重排
+ *   /taskwatch/notify*、/taskwatch/push*、/taskwatch/star/* -> 通知、推送、点星
  *   其余 /taskwatch/chat/* 见下面 ROUTES 表（读 + 少量写，逐条注释了理由）
  *   GET  /taskwatch/manifest.webmanifest  -> 本地 public/（PWA 外壳）
  *   GET  /taskwatch/sw.js                 -> 本地 public/（PWA 外壳）
@@ -103,7 +112,9 @@ const SW = resolveShell(process.env.RELAY_SW_FILE, 'sw.js')
 //
 // 这里是**能力边界**：上游插件新增一条路由，必须在这里显式放行才会对外可见。
 // 表里凡是标了 POST 的，都等于"把在宿主上驱动 agent 的能力开到了这条路上"。
-// 改这一节之前先想清楚，并把风险写进 README 的安全模型。
+// 1.2.0 起这张表覆盖手机页用到的**完整控制面**（审批、回答、队列、设备、通知、
+// 推送、点星）：远端不再只是"看"，而是能管。改这一节之前先想清楚，并把风险写进
+// README 的安全模型与 SECURITY.md。
 const ROUTES = new Map([
   ['/taskwatch', { upstream: '/taskwatch', type: 'text/html; charset=utf-8' }],
   ['/taskwatch/data', { upstream: '/taskwatch/data', type: 'application/json; charset=utf-8' }],
@@ -134,6 +145,61 @@ const ROUTES = new Map([
   ['/taskwatch/chat/create', { upstream: '/taskwatch/chat/create', type: 'application/json; charset=utf-8', methods: ['POST'] }],
   ['/taskwatch/chat/cancel', { upstream: '/taskwatch/chat/cancel', type: 'application/json; charset=utf-8', methods: ['POST'] }],
   ['/taskwatch/chat/model', { upstream: '/taskwatch/chat/model', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+
+  // ── 手机侧完整控制面（1.2.0）─────────────────────────────────────────────
+  // 这一段都是手机页真正会调、宿主也确实注册了的路由（逐条对过 lib/index.js）。
+  // 放行之后远端就是完整控制面；/taskwatch/pair/*、manifest / sw / file / lan* 等
+  // 仍然由中继自己或别处处理，不在这里放行。
+
+  // 审批：对一条待决定的操作放行或拒绝，是这里最直接的 agent 写入口。
+  ['/taskwatch/approve', { upstream: '/taskwatch/approve', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 回答选项式提问：把一次 user-questions 请求 resolve 成 { answers }。
+  ['/taskwatch/answer', { upstream: '/taskwatch/answer', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 当前在等决定的审批清单：只读，供页面画待办。
+  ['/taskwatch/decisions', { upstream: '/taskwatch/decisions', type: 'application/json; charset=utf-8', methods: ['GET', 'HEAD'] }],
+  // 审批与提问的事件流：页面可见时挂一条，审批一出现就推过来。
+  // 必须 stream: true（照 /taskwatch/chat/stream 的写法）：不做流式转发时这段 SSE 会被
+  // 整段缓冲，手机一路重连、审批要等到超时才出现，攒住的响应还会把内存顶爆。
+  ['/taskwatch/approvals/stream', { upstream: '/taskwatch/approvals/stream', type: 'text/event-stream; charset=utf-8', methods: ['GET', 'HEAD'], stream: true }],
+  // 消息队列：查看某个会话下一轮待发消息（只读，只回标量）。
+  ['/taskwatch/chat/queue', { upstream: '/taskwatch/chat/queue', type: 'application/json; charset=utf-8', methods: ['GET', 'HEAD'] }],
+  // 整队重排（写）：只按客户端看到的完整 id 列表整体替换，少/多/重复由宿主 409。
+  ['/taskwatch/chat/queue/reorder', { upstream: '/taskwatch/chat/queue/reorder', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 已配对设备清单：只读，只暴露掩码与时间戳，不含任何凭据。
+  ['/taskwatch/devices', { upstream: '/taskwatch/devices', type: 'application/json; charset=utf-8', methods: ['GET', 'HEAD'] }],
+  // 撤销一台设备（写）：本机标记撤销，下一次请求才 401 —— 等于少一条远端入口。
+  ['/taskwatch/devices/revoke', { upstream: '/taskwatch/devices/revoke', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 通知渠道清单：只读，只回掩码后的目标。
+  ['/taskwatch/notify', { upstream: '/taskwatch/notify', type: 'application/json; charset=utf-8', methods: ['GET', 'HEAD'] }],
+  // 新增一个通知渠道（写）。
+  ['/taskwatch/notify/add', { upstream: '/taskwatch/notify/add', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 删除一个通知渠道（写）。
+  ['/taskwatch/notify/remove', { upstream: '/taskwatch/notify/remove', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 发一条测试通知（写，会真的往外发一条消息，失败也回 200 + ok:false）。
+  ['/taskwatch/notify/test', { upstream: '/taskwatch/notify/test', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 打开 / 关闭一个通知渠道（写）。
+  ['/taskwatch/notify/toggle', { upstream: '/taskwatch/notify/toggle', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 系统推送状态：只读，回 VAPID 公钥与本站点的订阅数。
+  ['/taskwatch/push/state', { upstream: '/taskwatch/push/state', type: 'application/json; charset=utf-8', methods: ['GET', 'HEAD'] }],
+  // 订阅系统推送（写）：只存端点与公钥，不存任何浏览器凭据。
+  ['/taskwatch/push/subscribe', { upstream: '/taskwatch/push/subscribe', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 给这台设备发一条测试推送（写，走真实的加密 + VAPID 签名）。
+  ['/taskwatch/push/test', { upstream: '/taskwatch/push/test', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 退订系统推送（写）：给 id 删一条，不给就删这台设备的全部订阅。
+  ['/taskwatch/push/unsubscribe', { upstream: '/taskwatch/push/unsubscribe', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  // 点星：GitHub device flow 在宿主里跑，页面只拿 user_code 与结果，拿不到 token。
+  // 宿主这两条都只认 POST（手机页也是 POST），写成 GET|HEAD 只会换回宿主 405。
+  ['/taskwatch/star/start', { upstream: '/taskwatch/star/start', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+  ['/taskwatch/star/poll', { upstream: '/taskwatch/star/poll', type: 'application/json; charset=utf-8', methods: ['POST'] }],
+])
+
+// 版本与能力声明：插件读它们判断「远端能不能批准 / 回答 / 收审批流」。
+// 数组里只有能力**名字**，不含任何凭据；老插件不读这几个字段，老中继也不发，
+// 两边升级顺序任意。
+const RELAY_VERSION = '1.2.0'
+const CAPABILITIES = Object.freeze([
+  'approve', 'answer', 'queue', 'decisions', 'devices',
+  'notify', 'push', 'star', 'approvals-stream',
 ])
 
 // PWA 外壳：中继本地文件，不经过上游。同样是硬编码白名单。
@@ -649,10 +715,13 @@ function lanInfo() {
     addresses: addrs,
     entries: addrs.map((a) => 'http://' + a.ip + ':' + PORT + '/taskwatch'),
     pairing: 'http://127.0.0.1:' + PORT + '/taskwatch/pair',
-    // 能力声明：插件探测的就是这两个字段（免鉴权，**不含任何凭据**），据此决定签 v3 还是退回 v2。
-    // 老中继没有这两个字段 → 插件按"不支持 v3"处理。这个响应里绝不出现票据密钥。
+    // 能力声明：插件探测的就是这几个字段（免鉴权，**不含任何凭据**），据此决定
+    // 签 v3 还是退回 v2，以及远端能不能批准 / 回答 / 收审批流。
+    // 老中继没有这些字段 → 插件按"能力未知"处理。这个响应里绝不出现票据密钥。
+    relayVersion: RELAY_VERSION,
     ticketVersions: TICKET_VERSIONS,
     ticketAudience: TICKET_AUD_REMOTE,
+    capabilities: CAPABILITIES,
   }
 }
 
@@ -694,6 +763,21 @@ function lanPage() {
 <ul>${list}</ul>
 <ol start="3"><li>在弹出的配对页里输入那 6 位码 —— 之后 30 天内不用再输。</li></ol>
 <p class="dim">配对码 2 分钟有效、最多试 5 次、只能用一次，且只在 127.0.0.1 的页面上显示。</p>
+
+<h2>远端能做什么</h2>
+<p>中继 <b>${RELAY_VERSION}</b> 起，手机端拿到的不只是「看」：白名单覆盖了完整的控制面。插件也读 <code>/taskwatch/lan.json</code> 里的 <code>capabilities</code> 来判断这台中继支持到哪一步。</p>
+<ul>
+ <li><b>批准 / 拒绝</b>：审批一出现，手机上就能放行或拒绝。</li>
+ <li><b>回答提问</b>：选项式提问可以直接在手机上选。</li>
+ <li><b>审批清单</b>：看当前有哪些决定在等你。</li>
+ <li><b>审批事件流</b>：页面打开时挂一条推送，审批不用等轮询。</li>
+ <li><b>消息队列</b>：看下一轮待发消息，并整队重排。</li>
+ <li><b>设备管理</b>：看已配对设备，撤销其中一台。</li>
+ <li><b>通知渠道</b>：新增 / 删除 / 测试 / 开关外部通知。</li>
+ <li><b>系统推送</b>：订阅 / 测试 / 关闭浏览器推送。</li>
+ <li><b>点星</b>：GitHub 授权在宿主里完成，页面只拿结果。</li>
+</ul>
+<p class="dim">能力名同时由 <code>/healthz</code> 的 <code>x-taskwatch-capabilities</code> 声明，两边都不含任何凭据。代价写在下面：拿到配对 cookie 的人等于持有这台机器的终端。</p>
 
 <h2>这条路的硬限制（先知道再决定）</h2>
 <ul>
@@ -841,10 +925,13 @@ const server = createServer(async (req, res) => {
   }
 
   // 看门狗探活：免鉴权，且不回显任何状态内容。
-  // 顺带声明票据能力：插件靠它决定签 v3 还是回退 v2。旧插件不读这个头，旧中继也不发它，
-  // 两边都无感，升级顺序任意。
+  // 顺带声明票据与远端能力：插件靠它们决定签 v3 还是回退 v2，以及远端能不能批准、
+  // 回答、收审批流。旧插件不读这些头，旧中继也不发，两边无感，升级顺序任意。
   if (url.pathname === '/healthz') {
-    send(res, 200, 'text/plain; charset=utf-8', 'ok', { 'x-taskwatch-ticket-versions': TICKET_VERSIONS.join(',') })
+    send(res, 200, 'text/plain; charset=utf-8', 'ok', {
+      'x-taskwatch-ticket-versions': TICKET_VERSIONS.join(','),
+      'x-taskwatch-capabilities': CAPABILITIES.join(','),
+    })
     return
   }
 

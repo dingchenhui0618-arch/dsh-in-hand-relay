@@ -3,19 +3,19 @@
 [![CI](https://github.com/dingchenhui0618-arch/dsh-in-hand-relay/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/dingchenhui0618-arch/dsh-in-hand-relay/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT%20%2B%20Apache--2.0-blue.svg)](LICENSE)
 
-**把 DSH 的任务状态和手机端界面安全地送到你手机上的一层只读中继** —— 手机 → 公网 HTTPS → 你的 nginx → SSH 反向隧道 → 本机中继 → DSH，或者干脆手机和电脑同一个 Wi-Fi 直连。不需要公网 IP、不需要端口映射、不需要把 DSH 的 GUI 暴露出去。
+**把 DSH 的任务状态、对话和手机端控制面安全地送到你手机上的一层中继** —— 手机 → 公网 HTTPS → 你的 nginx → SSH 反向隧道 → 本机中继 → DSH，或者干脆手机和电脑同一个 Wi-Fi 直连。不需要公网 IP、不需要端口映射、不需要把 DSH 的 GUI 暴露出去。
 
-> 面向的读者：已经在自己电脑上跑 DSH，想用手机看任务/对话，但不想把「一个默认 `danger-full-access` 的终端」挂到公网上的人。照着本文从头做，大约 15 分钟能跑通局域网那条路。
+> 面向的读者：已经在自己电脑上跑 DSH，想用手机看任务/对话、顺手处理审批，但不想把「一个默认 `danger-full-access` 的终端」挂到公网上的人。照着本文从头做，大约 15 分钟能跑通局域网那条路。
 
 - 中继本身是一个**零依赖**的 Node 脚本（`server.mjs`，只用 Node 内置模块）。
 - 鉴权是**共享令牌** + **6 位配对码换 30 天 cookie**；令牌首次运行自动生成，不用向谁申请。
-- 暴露面是**硬编码白名单**：只有 `/taskwatch/*` 下面明确列出的路径能被转发，其余一律 404。
+- 暴露面是**硬编码白名单**：只有 `/taskwatch/*` 下面明确列出的路径能被转发，其余一律 404。从 **1.2.0** 起这张表覆盖手机端需要的**完整控制面**（审批 / 回答 / 队列 / 设备 / 通知 / 推送 / 点星），不再只是读。
 - 界面外壳（PWA）由中继本地提供，来自 [dsh-in-hand](https://github.com/dingchenhui0618-arch/dsh-in-hand) 插件仓库（Apache-2.0，见 `NOTICE`）；用上游插件的那份也可以。
 
 > 用着还行的话，点个 ⭐ 就够了——插件市场的「搜插件」按 GitHub star 排序，star 是这个插件能被人翻到的唯一杠杆。
 
 安全模型——它监听哪、谁能连、令牌与配对码各自的边界、白名单里哪些路由其实会写：
-[SECURITY.md](SECURITY.md)。
+[SECURITY.md](SECURITY.md)。一句话：拿到令牌（或配对 cookie）≈ 拿到你机器上的一个终端。
 
 ---
 
@@ -66,15 +66,28 @@
 
 DSH 的 web GUI **没有任何认证**，而本机默认权限常常是 `danger-full-access`。把这个 GUI 暴露到公网 = 把整台机器的控制权挂出去：任何人打开那个地址就能执行任意命令、读写任意文件。
 
-但「在外边看看任务跑到哪了 / 在手机上回一句话」只需要**一组固定的窄接口**。所以这里换了个做法：**不动 GUI，另开一个端口**，在那个端口上按白名单重发：
+但「在外边看看任务跑到哪了 / 在手机上回一句话 / 点一下批准」只需要**一组固定的窄接口**。所以这里换了个做法：**不动 GUI，另开一个端口**，在那个端口上按白名单重发：
 
 | 类别 | 内容 |
 |---|---|
-| 读 | `/taskwatch`（页面）、`/taskwatch/data`（全部状态）、`/taskwatch/session`（单会话对话）、`/taskwatch/chat/*` 里的会话/模型/用量/工作区/标题/分页/交付文件 |
-| 写（**4 条**，逐条在白名单里显式放行） | `/taskwatch/chat/send`、`/create`、`/cancel`、`/model`（另加附件上传 `/taskwatch/chat/upload`） |
+| 读 | `/taskwatch`（页面）、`/taskwatch/data`（全部状态）、`/taskwatch/session`（单会话对话）、`/taskwatch/decisions`（待决定清单）、`/taskwatch/devices`（已配对设备）、`/taskwatch/notify`、`/taskwatch/push/state`、`/taskwatch/chat/queue`（消息队列），以及 `/taskwatch/chat/*` 里的会话/模型/用量/工作区/标题/分页/交付文件 |
+| 事件流 | `/taskwatch/chat/stream`（对话逐字输出）、`/taskwatch/approvals/stream`（审批与提问，SSE 流式） |
+| 写（逐条在白名单里显式放行） | `/taskwatch/chat/send`、`/create`、`/cancel`、`/model`、`/upload`；`/taskwatch/approve`、`/answer`；`/chat/queue/reorder`；`/devices/revoke`；`/notify/add`、`/remove`、`/test`、`/toggle`；`/push/subscribe`、`/test`、`/unsubscribe`；`/star/start`、`/star/poll` |
 | 中继自己的 | `/healthz`、`/taskwatch/pair*`、`/taskwatch/lan*`、`/taskwatch/entries`、`/taskwatch/ticket`、`/taskwatch/upstream-health` |
 
 GUI 本体（`/api`、工具、文件、会话操作）**永远不出回环**；白名单之外的一切路径都是 404。
+
+**远端能做什么（1.2.0 起）**：手机上不只是看数据，还能完成原本要回到电脑前做的动作 ——
+
+- **批准 / 拒绝**一次待决定的操作，**回答**选项式提问；审批一出现就通过事件流推到手机上，不用等轮询；
+- 查看并**整队重排**下一轮待发消息；
+- 查看已配对设备、**撤销**其中一台；
+- 管理**通知渠道**（新增 / 删除 / 测试 / 开关）与**系统推送**（订阅 / 测试 / 退订）；
+- **点星**：GitHub 授权在宿主里完成，手机只拿结果。
+
+中继在 `/taskwatch/lan.json` 的 `capabilities` 与 `/healthz` 的 `x-taskwatch-capabilities`
+（1.2.0 起）上声明这些能力，插件据此判断「这台中继支持到哪一步」；两者都不含任何凭据。
+代价也很直接：**持有配对 cookie 的人等于持有这台机器的终端**。
 
 ---
 
@@ -501,7 +514,10 @@ journalctl -u taskwatch-relay -n 20 --no-pager | grep -E '票据密钥|票据版
 | `/taskwatch/ticket` | 否（POST） | 发一张一次性换路凭据，见上 |
 
 另外 `/healthz` 免鉴权、只回 `ok`、不回显任何状态 —— 给看门狗/负载均衡探活用；
-从 v1.1.0 起它多带一个 `x-taskwatch-ticket-versions: 3,2` 响应头，插件靠它判断这台中继支不支持 v3 票据。
+从 v1.1.0 起它带 `x-taskwatch-ticket-versions: 3,2`，插件靠它判断这台中继支不支持 v3 票据；
+从 **v1.2.0** 起再多带一个 `x-taskwatch-capabilities`（`approve,answer,queue,decisions,devices,notify,push,star,approvals-stream`），
+插件靠它判断「远端能不能批准 / 回答 / 收审批流」，同时也会读 `/taskwatch/lan.json` 的
+`relayVersion` 与 `capabilities`。两个响应头都不含凭据；老插件不读、老中继不发，升级顺序任意。
 
 ### 页面外壳和 PWA 为什么由中继本地提供
 
@@ -574,7 +590,11 @@ chcp 65001                                          # 或切代码页
 
 一句话：**拿到令牌（或配对码）≈ 拿到你机器上的一个终端。**
 
-- 白名单里有 **4 条写接口**（`chat/send`、`chat/create`、`chat/cancel`、`chat/model`）+ 附件上传。能打开页面的人就能**驱动 agent**；如果 DSH 的 preset 是 `danger-full-access`（默认常见如此），那 agent 能做的都等于他能做的：读写任意文件、执行任意命令。
+- 白名单从 **1.2.0** 起覆盖**完整控制面**，不再是只读：除了对话写接口（`chat/send`、`chat/create`、
+  `chat/cancel`、`chat/model`、附件上传），还能**批准 / 拒绝**待决定的操作、**回答**提问、整队重排、
+  撤销设备、改通知渠道、订阅或退订系统推送、点星。能打开页面的人就能做这些事；
+  如果 DSH 的 preset 是 `danger-full-access`（默认常见如此），那 agent 能做的都等于他能做的：
+  读写任意文件、执行任意命令。**持有配对 cookie 的人等于持有这台机器的终端。**
 - 所以请把「谁能打开这个页面」当成「谁能用你的电脑」，按这个标准决定：
   - 家里自己的 Wi-Fi：可以开。
   - 公司 / 咖啡厅 / 酒店 / 公共 Wi-Fi：**不要开局域网模式**。同一网段的人只要拿到地址 + 一个 6 位码（2 分钟内）就进去了；有些公共 Wi-Fi 还会做客户端互访。
@@ -595,6 +615,7 @@ chcp 65001                                          # 或切代码页
 - **开了客户端隔离（AP isolation）的 Wi-Fi 连不上**，即使同一个 SSID。公司/酒店 Wi-Fi 常见。
 - **中继看不出手机在哪个网络**（经隧道后来源都是 127.0.0.1），所以"自动选路"做不到，只能靠页面上的手动换路。
 - **配对码只在 127.0.0.1 的页面上显示**。如果你的中继跑在另一台机器上、你只能远程 SSH 进去，就需要端口转发（`ssh -L 3099:127.0.0.1:3099 ...`）后在本地浏览器打开配对页。
+- **中继不是只读的**：白名单里有审批、回答、队列重排、设备撤销、通知 / 推送、点星这些会改变宿主状态的路由。不想给这个能力，就不要把端口暴露出去。
 - **中继只做转发，不做 DSH 的事**：上游插件（dsh-in-hand）不装，就只能看到一个"上游不可达"的兜底页。
 - 中继没有多用户概念、没有审计日志、没有速率限制（只有配对失败计数）。它是**个人工具**，不是面向多租户的服务。
 

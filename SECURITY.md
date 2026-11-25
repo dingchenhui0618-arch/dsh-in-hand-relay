@@ -7,7 +7,8 @@
 > 一句话：这是一个**共享令牌门禁的固定路径转发器**，边界画在「有没有那个 256 位令牌」上，
 > 端口本身默认只绑回环；开了局域网模式就绑 `0.0.0.0`，能连上端口的人仍然过不了令牌这一关，
 > 但 6 位配对码是第二条入口。它**不是** DSH GUI 的认证层——3080 上的 GUI 依旧没有认证，
-> 中继只是不把 GUI 的管理面转发出去。
+> 中继也不转发 GUI 的管理面（`/api` 等）。但 `/taskwatch/*` 这一层从 1.2.0 起是**完整控制面**：
+> 白名单现在覆盖审批、回答、队列、设备、通知、推送、点星，**持有配对 cookie 的人等于持有这台机器的终端**。
 
 ## 信任边界
 
@@ -80,15 +81,23 @@
 ## 转发面（能力边界）
 
 上游路径是**硬编码白名单**（`ROUTES` / `STATIC`），表外一律 404，不代理 `/api`、不代理任意静态资源。
-表里不只有读接口——下面这些会真的驱动宿主机上的 agent：
+**从 1.2.0 起这张表是完整控制面**：不只是看数据，还能完成原本要回到电脑前做的动作。也就是说
+**持有配对 cookie 的人等于持有这台机器的终端**——请按这个标准决定谁能访问。
 
-- `POST /taskwatch/chat/send`（发消息）、`/chat/create`（新建对话）、`/chat/cancel`（取消）、
+- 对话写接口：`POST /taskwatch/chat/send`（发消息）、`/chat/create`（新建对话）、`/chat/cancel`（取消）、
   `/chat/model`（换模型）、`/chat/upload`（上传附件，原始二进制流式转发，大小上限在上游插件那侧）；
-- 读接口：`/taskwatch/data`、`/taskwatch/session`、`/chat/sessions`、`/chat/models`、`/chat/page`、
+- 审批 / 提问：`POST /taskwatch/approve`（放行或拒绝一次待决定操作）、`/taskwatch/answer`（回答选项式提问）、
+  `GET /taskwatch/decisions`（待决定清单）、`GET /taskwatch/approvals/stream`（审批与提问的 SSE 事件流）；
+- 队列：`GET /taskwatch/chat/queue`（下一轮待发消息）、`POST /taskwatch/chat/queue/reorder`（整队重排）；
+- 设备：`GET /taskwatch/devices`、`POST /taskwatch/devices/revoke`（撤销一台设备）；
+- 通知：`GET /taskwatch/notify`、`POST /taskwatch/notify/add|remove|test|toggle`；
+- 系统推送：`GET /taskwatch/push/state`、`POST /taskwatch/push/subscribe|test|unsubscribe`；
+- 点星：`POST /taskwatch/star/start|poll`（GitHub device flow 在宿主里跑，页面拿不到 token）；
+- 只读接口：`/taskwatch/data`、`/taskwatch/session`、`/chat/sessions`、`/chat/models`、`/chat/page`、
   `/chat/titles`、`/chat/usage`、`/chat/workspaces`、`/taskwatch/file`、`/chat/stream`（SSE 流式）。
 
-所以「只读中继」这个说法只在**不碰宿主管理面**的意义上成立：它读不到 DSH 的设置、插件、
-文件系统浏览接口，但**能替你发消息、取消任务、上传文件**——那已经是对 agent 的写入能力。
+「只读中继」这个说法从 1.2.0 起**不再成立**：它读不到 DSH 的设置、插件、文件系统浏览接口，但它能
+替你发消息、批准操作、撤销设备、改通知设置、点星——这些都会改变宿主状态。
 `/taskwatch/file` 的目录与扩展名白名单在上游插件那一侧，中继只负责按上游的 `content-type` 转发。
 
 ## 输入处理
@@ -129,7 +138,7 @@
 5. **没有失败限速以外的防护**：令牌校验没有按 IP 限速，SSE 长连接没有并发上限；配对码有
    （20 次/10 分钟），普通请求没有。
 6. **白名单是静态的**：上游插件新增路由必须改 `server.mjs` 才对外可见；这是能力边界，也是
-   升级时的维护点。
+   升级时的维护点。1.2.0 起它覆盖完整控制面，每次扩充都要重新评估「这条路由能改变什么」。
 7. **Windows 上没有 POSIX 权限位**：`.token` 与 `~/.dsh/taskwatch-ticket.key` 的 0600 在
    Windows 上不生效；密钥文件生成时用 `icacls /inheritance:r /grant:r <user>:F` 收紧，失败会
    如实标成 `icacls-failed` 打在启动日志里（只打状态，不打密钥）。

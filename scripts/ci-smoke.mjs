@@ -143,14 +143,22 @@ async function run() {
   }
   console.log('OK   loopback pairing code is 6 digits')
 
-  // 7. Capacity advertisement: the plugin reads these to choose v3 over v2.
+  // 7. Capacity advertisement: the plugin reads these to choose v3 over v2, and to
+  //    decide whether the remote end can approve/answer at all (v1.2.0).
   const hz = await fetch(`${BASE}/healthz`)
   const hzBody = await hz.text()
   if (hz.status !== 200 || hzBody !== 'ok') fail(`/healthz: expected 200 ok, got ${hz.status} ${hzBody.slice(0, 80)}`)
   if (hz.headers.get('x-taskwatch-ticket-versions') !== '3,2') {
     fail(`/healthz: expected x-taskwatch-ticket-versions "3,2", got ${JSON.stringify(hz.headers.get('x-taskwatch-ticket-versions'))}`)
   }
-  console.log('OK   /healthz declares x-taskwatch-ticket-versions: 3,2')
+  const caps = hz.headers.get('x-taskwatch-capabilities') || ''
+  if (!caps.split(',').includes('approve')) {
+    fail(`/healthz: expected x-taskwatch-capabilities to include "approve", got ${JSON.stringify(caps)}`)
+  }
+  if (!caps.split(',').includes('approvals-stream')) {
+    fail(`/healthz: expected x-taskwatch-capabilities to include "approvals-stream", got ${JSON.stringify(caps)}`)
+  }
+  console.log('OK   /healthz declares ticket versions 3,2 and capabilities (approve, approvals-stream)')
 
   // 8. lan.json is unauthenticated, declares the same capabilities, and never
   //    carries the ticket secret.
@@ -162,8 +170,14 @@ async function run() {
   if (lanJson.ticketAudience !== 'remote') {
     fail(`/taskwatch/lan.json: expected ticketAudience "remote", got ${JSON.stringify(lanJson.ticketAudience)}`)
   }
+  if (lanJson.relayVersion !== '1.2.0') {
+    fail(`/taskwatch/lan.json: expected relayVersion "1.2.0", got ${JSON.stringify(lanJson.relayVersion)}`)
+  }
+  if (!Array.isArray(lanJson.capabilities) || !lanJson.capabilities.includes('approvals-stream')) {
+    fail(`/taskwatch/lan.json: expected capabilities to include "approvals-stream", got ${JSON.stringify(lanJson.capabilities)}`)
+  }
   if (lan.body.includes(TICKET_SECRET)) fail('/taskwatch/lan.json: must never contain the ticket secret')
-  console.log('OK   /taskwatch/lan.json declares ticketVersions [3,2] and ticketAudience remote')
+  console.log('OK   /taskwatch/lan.json declares relayVersion 1.2.0 and the approvals-stream capability')
 
   // 9. A ticket signed by the plugin host (same secret, v3, aud=remote) is
   //    redeemed exactly like one minted by the relay: 302 + HttpOnly cookie.
@@ -242,6 +256,39 @@ async function run() {
   await mintedRedeem.text()
   if (mintedRedeem.status !== 302) fail(`relay-minted ticket: expected 302, got ${mintedRedeem.status}`)
   console.log('OK   POST /taskwatch/ticket mints a redeemable v3 ticket')
+
+  // 16. v1.2.0 的远端控制面：白名单里每条新路由在无令牌时都必须是 401，而不是
+  //     404（没放行）或 500（放行了但炸了）。方法必须与 ROUTES 一致 —— 中继的方法
+  //     检查在鉴权之前，拿 GET 打 POST-only 路由只会得到 405，反而看不出放行没有。
+  const controlPlane = [
+    ['POST', '/taskwatch/approve'],
+    ['POST', '/taskwatch/answer'],
+    ['GET', '/taskwatch/decisions'],
+    ['GET', '/taskwatch/approvals/stream'],
+    ['GET', '/taskwatch/chat/queue'],
+    ['POST', '/taskwatch/chat/queue/reorder'],
+    ['GET', '/taskwatch/devices'],
+    ['POST', '/taskwatch/devices/revoke'],
+    ['GET', '/taskwatch/notify'],
+    ['POST', '/taskwatch/notify/add'],
+    ['POST', '/taskwatch/notify/remove'],
+    ['POST', '/taskwatch/notify/test'],
+    ['POST', '/taskwatch/notify/toggle'],
+    ['GET', '/taskwatch/push/state'],
+    ['POST', '/taskwatch/push/subscribe'],
+    ['POST', '/taskwatch/push/test'],
+    ['POST', '/taskwatch/push/unsubscribe'],
+    ['POST', '/taskwatch/star/start'],
+    ['POST', '/taskwatch/star/poll'],
+  ]
+  for (const [method, path] of controlPlane) {
+    const r = await fetch(`${BASE}${path}`, { method, redirect: 'manual' })
+    await r.text()
+    if (r.status !== 401) {
+      fail(`${method} ${path}: expected 401 without a token, got ${r.status}`)
+    }
+  }
+  console.log(`OK   ${controlPlane.length} control-plane routes require the token (401)`)
 
   console.log('PASS relay smoke test')
 }
