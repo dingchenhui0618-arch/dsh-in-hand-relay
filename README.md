@@ -512,12 +512,15 @@ journalctl -u taskwatch-relay -n 20 --no-pager | grep -E '票据密钥|票据版
 | `/taskwatch/entries` | 否 | 「我该从哪条路进来」：公网入口、局域网入口清单、你现在是从哪条路进来的（`remote` / `lan` / `local` / `unknown`）、局域网模式开没开。页面上的"换路"按钮靠它 |
 | `/taskwatch/upstream-health` | 否 | 上游体检：对 DSH 发一次 4 秒超时的探测，回 `{ok, status, ms, upstream}`。用来把「手机连不上」区分成「中继/隧道坏了」还是「DSH 没在跑」 |
 | `/taskwatch/ticket` | 否（POST） | 发一张一次性换路凭据，见上 |
+| `/taskwatch/shell.json` | 否 | 当前发出去的页面外壳：文件名、字节数、SHA-256、构建号、与上次同步是否一致（`sync: ok/stale/unknown`）。远端"少了一个月界面"时先看这里 |
 
 另外 `/healthz` 免鉴权、只回 `ok`、不回显任何状态 —— 给看门狗/负载均衡探活用；
 从 v1.1.0 起它带 `x-taskwatch-ticket-versions: 3,2`，插件靠它判断这台中继支不支持 v3 票据；
 从 **v1.2.0** 起再多带一个 `x-taskwatch-capabilities`（`approve,answer,queue,decisions,devices,notify,push,star,approvals-stream`），
 插件靠它判断「远端能不能批准 / 回答 / 收审批流」，同时也会读 `/taskwatch/lan.json` 的
 `relayVersion` 与 `capabilities`。两个响应头都不含凭据；老插件不读、老中继不发，升级顺序任意。
+从 **v1.2.2** 起还带当前页面外壳的指纹（`x-shell-build` / `x-shell-sha256` / `x-shell-sync`），
+看门狗每分钟探一次，就能发现「页面被换成了旧文件」。
 
 ### 页面外壳和 PWA 为什么由中继本地提供
 
@@ -533,6 +536,35 @@ service worker 和页面外壳**必须同版本**：这两个文件曾经各有�
 ```
 node scripts/sync-shell.mjs ../dsh-taskwatch
 ```
+
+同步会写 `public/shell.json`：来源、插件版本、逐文件 SHA-256、同步时间。中继把它和
+实际发出去的文件比对，于是**漂移可见**：
+
+```bash
+# 中继自己说它发的是哪一版（不需要登录）
+curl -sI https://dsh.example.com/healthz | grep -i x-shell
+
+# 需要令牌：文件名、字节数、sha、与上次同步是否一致
+curl -s -H "Authorization: Bearer <令牌>" https://dsh.example.com/taskwatch/shell.json
+```
+
+`x-shell-sync` 三种取值：`ok`（和 `shell.json` 一致）、`stale`（文件被换过但没走同步）、
+`unknown`（没有记录）。`stale` / `unknown` 时中继启动日志会直接警告。发版前想只检查不写：
+
+```
+node scripts/sync-shell.mjs --check ../dsh-taskwatch
+```
+
+**缓存策略（有意为之，别"优化"）**：
+
+- 页面、`sw.js`、`manifest` 一律 `Cache-Control: no-store` —— 更新靠文件内容换，
+  不靠过期时间。上一个版本的教训是：外壳的"过期"没有可验证的版本边界，谁也说不清
+  手机上是哪一版。
+- 页面在 SW 里是 **network-first**，成功响应才写缓存；离线才回缓存。
+- 页面注册 SW 时带 `updateViaCache:'none'`，绕过浏览器对 `sw.js` 的 HTTP 缓存；
+  加载、切回前台、每 30 分钟主动 `registration.update()`；新 SW 接管后页面自刷一次。
+- nginx 侧**不要**给 `/taskwatch` 加 `expires` / `proxy_cache`：中继已经声明 no-store，
+  再叠一层缓存只会让"远端旧界面"更难查。
 
 ---
 

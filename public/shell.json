@@ -1,0 +1,21 @@
+{
+  "source": "D:/Projects/dsh-taskwatch",
+  "pluginVersion": "1.10.1",
+  "syncedAt": "2026-11-25T07:14:14.956Z",
+  "bytes": 590899,
+  "sha256": "f002e6ec76ffe28c1443b4710cea0abac4916e202a098521d71cb417e1a3c558",
+  "files": {
+    "page.html": {
+      "bytes": 590899,
+      "sha256": "f002e6ec76ffe28c1443b4710cea0abac4916e202a098521d71cb417e1a3c558"
+    },
+    "sw.js": {
+      "bytes": 17681,
+      "sha256": "3d24b31493d187c52c71e8d3752bd81a7bf6bab2f2228080d056427193517c67"
+    },
+    "manifest.webmanifest": {
+      "bytes": 601,
+      "sha256": "4e8dad225b05784906619b35aeb094080189f7170d8e8fc161f7f1b17c9d4da9"
+    }
+  }
+}

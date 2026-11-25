@@ -56,9 +56,9 @@
  *                      否则插件签的票到这里一律 401。
  */
 import { createServer } from 'node:http'
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, chmodSync, mkdirSync, statSync } from 'node:fs'
 import { homedir, networkInterfaces } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -106,6 +106,76 @@ const PAGE_FILE = PAGE && PAGE.path
 // （一份不删旧缓存、也不认 /taskwatch/session），到底拿到哪个取决于请求先命中谁。
 // 所以这里只认一次。
 const SW = resolveShell(process.env.RELAY_SW_FILE, 'sw.js')
+
+// ── 外壳指纹：让"手机拿到的是哪一版"变成一个可查的数字 ───────────────────
+//
+// 2026-11-25 的事故复盘：旧中继直接读插件的 lib/page.html，换成自带 public/ 副本
+// 之后，副本停在 10-12（181 KB），而 HTTP 一律 200、PWA 照常渲染 —— 从外面**完全
+// 看不出**远端界面少了一个月的功能。那次是靠逐字节比大小才发现的。
+//
+// 所以这里不再只说"发的是页面"，而是把发出去的这一份的字节数与 SHA-256 一起回给
+// 客户端和运维（响应头 + /taskwatch/shell.json + lan.json）。sync-shell 会写一份
+// public/shell.json 记录"上次同步时的指纹"，两边的 sha 不一致就标 stale —— 下次
+// 同类的漂移在 curl -I 里就能看见，不需要再去比文件。
+const SHELL_RECORD_FILE = join(PUBLIC_DIR, 'shell.json')
+let shellCache = null
+
+/** 读一次外壳并记住指纹；文件 mtime/size 变了才重新读。 */
+function readShell() {
+  if (!PAGE_FILE) return null
+  try {
+    const st = statSync(PAGE_FILE)
+    const key = st.mtimeMs + ':' + st.size
+    if (shellCache && shellCache.key === key) return shellCache
+    const buf = readFileSync(PAGE_FILE)
+    const sha256 = createHash('sha256').update(buf).digest('hex')
+    shellCache = {
+      key,
+      buf,
+      meta: { bytes: buf.length, sha256, build: sha256.slice(0, 12), mtimeMs: st.mtimeMs },
+    }
+    return shellCache
+  } catch {
+    return null
+  }
+}
+
+/** 同步记录里写的指纹 vs 当前实际发出去的指纹。 */
+function shellSyncState(meta) {
+  try {
+    const rec = JSON.parse(readFileSync(SHELL_RECORD_FILE, 'utf8'))
+    if (!rec || typeof rec.sha256 !== 'string') return 'unknown'
+    return rec.sha256 === meta.sha256 ? 'ok' : 'stale'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/** 外壳指纹的 JSON 形状（lan.json 与 /taskwatch/shell.json 共用）。 */
+function shellInfo() {
+  const shell = readShell()
+  if (!shell) return null
+  return {
+    build: shell.meta.build,
+    bytes: shell.meta.bytes,
+    sha256: shell.meta.sha256,
+    mtime: new Date(shell.meta.mtimeMs).toISOString(),
+    sync: shellSyncState(shell.meta),
+  }
+}
+
+/** 页面/外壳相关响应统一带上的指纹头（不含任何凭据）。 */
+function shellHeaders(meta) {
+  const headers = {
+    'x-relay-version': RELAY_VERSION,
+    'x-shell-bytes': String(meta.bytes),
+    'x-shell-sha256': meta.sha256,
+    'x-shell-build': meta.build,
+    'x-shell-mtime': new Date(meta.mtimeMs).toISOString(),
+    'x-shell-sync': shellSyncState(meta),
+  }
+  return headers
+}
 
 // 允许代理的上游路径：硬编码白名单，每条都带**显式** content-type 和允许的方法。
 // 不按上游的响应头透传：中继自己决定发什么类型。
@@ -196,7 +266,7 @@ const ROUTES = new Map([
 // 版本与能力声明：插件读它们判断「远端能不能批准 / 回答 / 收审批流」。
 // 数组里只有能力**名字**，不含任何凭据；老插件不读这几个字段，老中继也不发，
 // 两边升级顺序任意。
-const RELAY_VERSION = '1.2.1'
+const RELAY_VERSION = '1.2.2'
 const CAPABILITIES = Object.freeze([
   'approve', 'answer', 'queue', 'decisions', 'devices',
   'notify', 'push', 'star', 'approvals-stream',
@@ -722,6 +792,9 @@ function lanInfo() {
     ticketVersions: TICKET_VERSIONS,
     ticketAudience: TICKET_AUD_REMOTE,
     capabilities: CAPABILITIES,
+    // 页面外壳的指纹（字节数 / SHA-256 / 与上次 sync-shell 是否一致）。
+    // 只用来判断"手机拿到的是哪一版"，不含任何凭据。
+    shell: shellInfo(),
   }
 }
 
@@ -928,10 +1001,22 @@ const server = createServer(async (req, res) => {
   // 顺带声明票据与远端能力：插件靠它们决定签 v3 还是回退 v2，以及远端能不能批准、
   // 回答、收审批流。旧插件不读这些头，旧中继也不发，两边无感，升级顺序任意。
   if (url.pathname === '/healthz') {
-    send(res, 200, 'text/plain; charset=utf-8', 'ok', {
+    // 外壳指纹也放在这里：看门狗每分钟都会打一次，于是"页面被换成旧文件"
+    // 从监控侧就能发现，而不是等手机上少了功能才知道。
+    const sh = readShell()
+    const shellHdr = sh
+      ? {
+          'x-shell-bytes': String(sh.meta.bytes),
+          'x-shell-sha256': sh.meta.sha256,
+          'x-shell-build': sh.meta.build,
+          'x-shell-sync': shellSyncState(sh.meta),
+        }
+      : {}
+    send(res, 200, 'text/plain; charset=utf-8', 'ok', Object.assign({
       'x-taskwatch-ticket-versions': TICKET_VERSIONS.join(','),
       'x-taskwatch-capabilities': CAPABILITIES.join(','),
-    })
+      'x-relay-version': RELAY_VERSION,
+    }, shellHdr))
     return
   }
 
@@ -1109,7 +1194,10 @@ const server = createServer(async (req, res) => {
   const route = ROUTES.get(url.pathname) ||
     [...ROUTES.entries()].find(([p, r]) => r.prefix && (url.pathname === p || url.pathname.startsWith(p + '/')))?.[1]
   const asset = STATIC.get(url.pathname)
-  if (!route && !asset) {
+  // 只由中继自己回答、不代理上游的路径。放在白名单表之外，是因为 ROUTES 是
+  // 「允许把哪些能力开到远端的边界」，一条诊断路由不该混进那张表里。
+  const LOCAL_ONLY = url.pathname === '/taskwatch/shell.json'
+  if (!route && !asset && !LOCAL_ONLY) {
     send(res, 404, 'text/plain; charset=utf-8', 'not found')
     return
   }
@@ -1170,25 +1258,52 @@ const server = createServer(async (req, res) => {
       buf = undefined
     }
     if (buf !== undefined) {
-      send(res, 200, asset.type, buf, { 'service-worker-allowed': '/taskwatch' })
+      send(res, 200, asset.type, buf, {
+        'service-worker-allowed': '/taskwatch',
+        'x-relay-version': RELAY_VERSION,
+        'x-asset-bytes': String(buf.length),
+        'x-asset-sha256': createHash('sha256').update(buf).digest('hex'),
+      })
       return
     }
+  }
+
+  // 外壳指纹（需要鉴权）：运维排查"远端到底跑的是哪一版"的第一站。
+  // 与 /taskwatch 响应头上的 x-shell-* 是同一份数据，只是给脚本用。
+  if (url.pathname === '/taskwatch/shell.json') {
+    const shell = readShell()
+    if (!shell) {
+      sendJson(res, 404, { ok: false, error: '没有页面外壳（PAGE_FILE 未找到）' })
+      return
+    }
+    let record = null
+    try { record = JSON.parse(readFileSync(SHELL_RECORD_FILE, 'utf8')) } catch { /* 没有同步记录 */ }
+    sendJson(res, 200, {
+      ok: true,
+      relayVersion: RELAY_VERSION,
+      file: PAGE_FILE,
+      build: shell.meta.build,
+      bytes: shell.meta.bytes,
+      sha256: shell.meta.sha256,
+      mtime: new Date(shell.meta.mtimeMs).toISOString(),
+      // ok = 和上次 sync-shell 同步的指纹一致；stale = 文件被换过但没走同步（或反过来）
+      sync: shellSyncState(shell.meta),
+      syncedAt: record && record.syncedAt ? record.syncedAt : null,
+      source: record && record.source ? record.source : null,
+      pluginVersion: record && record.pluginVersion ? record.pluginVersion : null,
+    })
+    return
   }
 
   // 页面外壳：优先用本目录 public/page.html（或 RELAY_PAGE_FILE 指的那份）。
   // 读不到就用内建兜底页 —— 保证 clone 下来就能打开，而不是 500。
   if (url.pathname === '/taskwatch') {
-    if (PAGE_FILE) {
-      let page
-      try {
-        page = readFileSync(PAGE_FILE)
-      } catch {
-        page = undefined
-      }
-      if (page !== undefined) {
-        send(res, 200, 'text/html; charset=utf-8', page, { 'service-worker-allowed': '/taskwatch' })
-        return
-      }
+    const shell = readShell()
+    if (shell) {
+      send(res, 200, 'text/html; charset=utf-8', shell.buf, Object.assign({
+        'service-worker-allowed': '/taskwatch',
+      }, shellHeaders(shell.meta)))
+      return
     }
     send(res, 200, 'text/html; charset=utf-8', BUILTIN_PAGE, { 'service-worker-allowed': '/taskwatch' })
     return
@@ -1330,6 +1445,18 @@ server.listen(PORT, BIND, () => {
     console.log('')
   }
   console.log('  页面外壳  ' + (PAGE_FILE ? PAGE_FILE : '（未找到页面外壳，使用内建兜底页）'))
+  {
+    const sh = readShell()
+    if (sh) {
+      const sync = shellSyncState(sh.meta)
+      console.log('  外壳指纹  ' + sh.meta.build + ' · ' + sh.meta.bytes + ' B · sha256 ' + sh.meta.sha256.slice(0, 16) + '…')
+      console.log('  同步记录  ' + (sync === 'ok'
+        ? '与 public/shell.json 一致'
+        : sync === 'stale'
+          ? '⚠ 与 public/shell.json 不一致：这份外壳不是 sync-shell 同步进来的，远端可能又是旧界面'
+          : '⚠ 没有 public/shell.json：无法判断这份外壳是否跟插件同步（发版前跑 node scripts/sync-shell.mjs ../dsh-taskwatch）'))
+    }
+  }
   if (LAN_MODE) {
     const info = lanInfo()
     console.log('  局域网模式 已开启（标记文件 ' + LAN_MARKER + '）')

@@ -170,14 +170,43 @@ async function run() {
   if (lanJson.ticketAudience !== 'remote') {
     fail(`/taskwatch/lan.json: expected ticketAudience "remote", got ${JSON.stringify(lanJson.ticketAudience)}`)
   }
-  if (lanJson.relayVersion !== '1.2.1') {
-    fail(`/taskwatch/lan.json: expected relayVersion "1.2.1", got ${JSON.stringify(lanJson.relayVersion)}`)
+  if (lanJson.relayVersion !== '1.2.2') {
+    fail(`/taskwatch/lan.json: expected relayVersion "1.2.2", got ${JSON.stringify(lanJson.relayVersion)}`)
   }
   if (!Array.isArray(lanJson.capabilities) || !lanJson.capabilities.includes('approvals-stream')) {
     fail(`/taskwatch/lan.json: expected capabilities to include "approvals-stream", got ${JSON.stringify(lanJson.capabilities)}`)
   }
   if (lan.body.includes(TICKET_SECRET)) fail('/taskwatch/lan.json: must never contain the ticket secret')
-  console.log('OK   /taskwatch/lan.json declares relayVersion 1.2.1 and the approvals-stream capability')
+  console.log('OK   /taskwatch/lan.json declares relayVersion 1.2.2 and the approvals-stream capability')
+
+  // 8b. Shell fingerprint (v1.2.2). 2026-11-25: the relay served a month-old shell and
+  //     every HTTP surface looked fine — the only way to notice was comparing bytes.
+  //     Now the served copy identifies itself, so "which build is the phone on" is one
+  //     request instead of a forensic exercise.
+  const auth = { authorization: `Bearer ${TOKEN}` }
+  const pageAuth = await expect('/taskwatch', { status: 200, init: { headers: auth } })
+  const shellSha = pageAuth.headers.get('x-shell-sha256') || ''
+  const shellBytes = Number(pageAuth.headers.get('x-shell-bytes') || 0)
+  if (!/^[0-9a-f]{64}$/.test(shellSha)) {
+    fail(`/taskwatch: expected x-shell-sha256 to be a 64-char hex digest, got ${JSON.stringify(shellSha)}`)
+  }
+  if (!(shellBytes > 100000)) {
+    fail(`/taskwatch: expected x-shell-bytes > 100000, got ${JSON.stringify(pageAuth.headers.get('x-shell-bytes'))}`)
+  }
+  if (pageAuth.headers.get('cache-control') !== 'no-store') {
+    fail(`/taskwatch: expected cache-control "no-store", got ${JSON.stringify(pageAuth.headers.get('cache-control'))}`)
+  }
+  if (hz.headers.get('x-shell-sha256') !== shellSha) {
+    fail('/healthz: shell sha must match the one served at /taskwatch (watchdog relies on it)')
+  }
+  const shellJson = JSON.parse((await expect('/taskwatch/shell.json', { status: 200, init: { headers: auth } })).body)
+  if (shellJson.sha256 !== shellSha || shellJson.bytes !== shellBytes) {
+    fail(`/taskwatch/shell.json: sha/bytes must match the page response (got ${shellJson.bytes}/${String(shellJson.sha256).slice(0, 8)})`)
+  }
+  if (shellJson.sync !== 'ok') {
+    fail(`/taskwatch/shell.json: expected sync "ok" (run sync-shell), got ${JSON.stringify(shellJson.sync)}`)
+  }
+  console.log('OK   /taskwatch identifies its shell build/size, declares no-store, and shell.json matches')
 
   // 9. A ticket signed by the plugin host (same secret, v3, aud=remote) is
   //    redeemed exactly like one minted by the relay: 302 + HttpOnly cookie.
